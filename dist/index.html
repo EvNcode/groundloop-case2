@@ -3,12 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#102433" />
-    <meta name="description" content="GroundLoop — рабочий MVP для учёта и переработки кофейного жмыха Global Coffee × Coyote." />
-    <title>GroundLoop — кофейный жмых в новый продукт</title>
+    <meta name="theme-color" content="#201e1b" />
+    <meta name="description" content="GroundLoop — внутренняя операционная консоль для учёта, сбора и переработки кофейного жмыха Global Coffee × Coyote." />
+    <title>GroundLoop — операционный учёт жмыха</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&amp;family=Unbounded:wght@600;700&amp;display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="./styles.css" />
     <script>
       window.__groundloopErrors = [];
@@ -29,7 +29,7 @@
           </div>
         </div>
 
-        <div class="mode-pill"><span></span> Демо на синтетических данных</div>
+        <div class="mode-line"><span></span><div><strong>Демо-режим</strong><small>Синтетические данные</small></div></div>
 
         <nav class="main-nav" aria-label="Основная навигация">
           <button class="nav-item active" data-view="overview"><b>01</b><span>Обзор</span></button>
@@ -45,7 +45,8 @@
           <div class="workflow-mini">
             <span>Чашка</span><i></i><span>Сбор</span><i></i><span>Продукт</span>
           </div>
-          <p>Каждый килограмм виден от точки до продажи.</p>
+          <p>Каждый килограмм виден от точки до партии</p>
+          <a class="unslop-credit" href="https://github.com/heydamir/unslop" target="_blank" rel="noreferrer">Interface pass: Unslop by Damir Sokolovsky</a>
         </div>
       </aside>
 
@@ -53,19 +54,19 @@
         <header class="topbar">
           <button class="menu-button" id="menuButton" aria-label="Открыть меню">☰</button>
           <div>
-            <p class="eyebrow" id="viewEyebrow">GROUNDLOOP / ОПЕРАЦИОННЫЙ ЦЕНТР</p>
+            <p class="eyebrow" id="viewEyebrow">Операционный центр</p>
             <h1 id="viewTitle">Обзор пилота</h1>
           </div>
           <div class="topbar-actions">
             <label class="scenario-select">
-              <span>Сценарий</span>
+              <span>Расчёт</span>
               <select id="globalScenario">
                 <option value="conservative">Осторожный</option>
                 <option value="base" selected>Базовый</option>
                 <option value="optimistic">Оптимистичный</option>
               </select>
             </label>
-            <button class="button button-primary" data-action="open-collection">+ Новый сбор</button>
+            <button class="button button-primary" data-action="open-collection">Зафиксировать сбор</button>
           </div>
         </header>
 
@@ -77,7 +78,7 @@
       <form method="dialog" id="collectionForm">
         <div class="dialog-header">
           <div>
-            <p class="eyebrow">НОВАЯ ЗАПИСЬ</p>
+            <p class="eyebrow">Новая запись</p>
             <h2>Сбор жмыха на точке</h2>
           </div>
           <button class="icon-button" value="cancel" aria-label="Закрыть">×</button>

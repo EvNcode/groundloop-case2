@@ -29,3 +29,7 @@ node --check dist/app.js
 ```
 
 Все текущие объёмы, цены и технологические коэффициенты являются синтетическими допущениями и помечены в интерфейсе.
+
+## Design attribution
+
+The interface redesign follows the [Unslop](https://github.com/heydamir/unslop) skill by Damir Sokolovsky, licensed under CC BY 4.0.

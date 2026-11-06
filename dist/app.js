@@ -15,13 +15,13 @@ import {
 
 const TODAY = "2026-11-06";
 const viewMeta = {
-  overview: ["GROUNDLOOP / ОПЕРАЦИОННЫЙ ЦЕНТР", "Обзор пилота"],
-  collections: ["СЫРЬЁ / ТОЧКИ", "Сбор на точках"],
-  logistics: ["ОПЕРАЦИИ / МАРШРУТЫ", "Логистика сбора"],
-  production: ["ПАРТИИ / ПЕРЕРАБОТКА", "Производство"],
-  economics: ["МОДЕЛЬ / СЦЕНАРИИ", "Экономика проекта"],
-  traceability: ["ПРОЗРАЧНОСТЬ / QR", "Паспорт партии"],
-  data: ["ИСТОЧНИКИ / COYOTE", "Данные и импорт"],
+  overview: ["Операционный центр", "Смена и задачи"],
+  collections: ["Сырьё / точки", "Сбор на точках"],
+  logistics: ["Операции / маршруты", "Логистика сбора"],
+  production: ["Партии / переработка", "Производство"],
+  economics: ["Модель / сценарии", "Экономика проекта"],
+  traceability: ["Прослеживаемость / QR", "Паспорт партии"],
+  data: ["Источники / Coyote", "Данные и импорт"],
 };
 
 function seedState() {
@@ -194,19 +194,20 @@ function formatDate(value) {
 
 function syntheticNotice() {
   return `
-    <div class="notice">
-      <span class="notice-dot"></span>
-      <div><strong>Демонстрационный режим</strong>Все объёмы и цены сейчас синтетические. Они вынесены в параметры и заменятся реальными данными Global Coffee без изменения логики продукта.</div>
+    <div class="data-note">
+      <span class="data-note-dot"></span>
+      <strong>Синтетические данные</strong>
+      <span>Все объёмы и цены заменяются реальными значениями без изменения процесса</span>
     </div>`;
 }
 
 function renderKpis(metrics) {
   return `
-    <div class="kpi-grid">
-      <article class="kpi-card"><div class="kpi-label">Активные точки пилота</div><div class="kpi-value">${metrics.activeStores}</div><div class="kpi-footer"><span>из ${state.stores.length} в сети</span><span class="trend">масштабируемо</span></div></article>
-      <article class="kpi-card"><div class="kpi-label">Жмых за текущий цикл</div><div class="kpi-value">${formatNumber(metrics.wetKg, 1)} кг</div><div class="kpi-footer"><span>${metrics.measuredPct}% измерено</span><span class="trend">учтено</span></div></article>
-      <article class="kpi-card"><div class="kpi-label">Готово к вывозу</div><div class="kpi-value">${formatNumber(metrics.readyKg, 1)} кг</div><div class="kpi-footer"><span>${metrics.readyCount} контейнера</span><span class="trend warn">нужен маршрут</span></div></article>
-      <article class="kpi-card"><div class="kpi-label">Потенциал прибыли / мес.</div><div class="kpi-value">${formatMoney(metrics.economics.profit)}</div><div class="kpi-footer"><span>базовый сценарий</span><span class="trend">${metrics.economics.marginPct}%</span></div></article>
+    <div class="metrics-strip">
+      <article class="metric"><div class="kpi-label">Точки в пилоте</div><div class="kpi-value">${metrics.activeStores}</div><div class="kpi-footer">из ${state.stores.length} точек сети</div></article>
+      <article class="metric"><div class="kpi-label">Учтено за цикл</div><div class="kpi-value">${formatNumber(metrics.wetKg, 1)} <small>кг</small></div><div class="kpi-footer">${metrics.measuredPct}% взвешено</div></article>
+      <article class="metric metric-attention"><div class="kpi-label">К вывозу</div><div class="kpi-value">${formatNumber(metrics.readyKg, 1)} <small>кг</small></div><div class="kpi-footer">${metrics.readyCount} готовых контейнера</div></article>
+      <article class="metric"><div class="kpi-label">Модельная прибыль</div><div class="kpi-value">${formatMoney(metrics.economics.profit)}</div><div class="kpi-footer">${metrics.economics.marginPct}% · ${SCENARIOS[state.scenario].label.toLowerCase()} расчёт</div></article>
     </div>`;
 }
 
@@ -241,36 +242,52 @@ function renderOverview() {
   const workflowWet = round(state.collections.filter((x) => x.status !== "rejected").reduce((s, x) => s + x.wetKg, 0), 1);
   const workflowDry = calculateDryOutput(workflowWet, SCENARIOS[state.scenario].dryYieldPct, SCENARIOS[state.scenario].rejectPct);
   const packs = calculatePackOutput(workflowDry.acceptedKg, 160, 100);
+  const pendingQuality = state.collections.filter((x) => x.quality === "pending").length;
+  const activeRoutes = state.routes.filter((x) => x.status === "planned").length;
+  const unbatched = state.collections.filter((x) => x.status === "collected" && !state.batches.some((b) => b.collectionIds.includes(x.id)));
+  const activeStores = state.stores.filter((store) => store.active);
   return `
     <div class="view-stack">
       ${syntheticNotice()}
-      <section class="hero-grid">
-        <article class="hero-card">
-          <p class="eyebrow" style="color:#d69a70">ОТ ЧАШКИ ДО НОВОГО ПРОДУКТА</p>
-          <h2>Жмых становится управляемым сырьём.</h2>
-          <p>Coyote прогнозирует объём по продажам, точки фиксируют фактический вес, GroundLoop собирает партии и показывает экономику переработки.</p>
-          <div class="hero-flow"><span class="flow-node">Продажи Coyote</span><span class="flow-arrow">→</span><span class="flow-node">Контейнер</span><span class="flow-arrow">→</span><span class="flow-node">Маршрут</span><span class="flow-arrow">→</span><span class="flow-node">Coffee Fire</span></div>
+      ${renderKpis(metrics)}
+      <section class="operations-grid">
+        <article class="panel flow-panel">
+          <div class="panel-header"><div><h2>Материальный поток</h2><p>Расчёт по текущему циклу и выбранному сценарию</p></div><span class="panel-meta">обновлено 23:10</span></div>
+          <div class="material-flow">
+            <div class="material-stage"><span class="stage-index">01</span><div><small>На точках</small><strong>${formatNumber(workflowWet, 1)} кг</strong><p>Мокрый жмых</p></div></div>
+            <span class="route-connector"></span>
+            <div class="material-stage"><span class="stage-index">02</span><div><small>После сушки</small><strong>${formatNumber(workflowDry.driedKg, 1)} кг</strong><p>${SCENARIOS[state.scenario].dryYieldPct}% выхода</p></div></div>
+            <span class="route-connector"></span>
+            <div class="material-stage"><span class="stage-index">03</span><div><small>Принято</small><strong>${formatNumber(workflowDry.acceptedKg, 1)} кг</strong><p>После контроля</p></div></div>
+            <span class="route-connector"></span>
+            <div class="material-stage material-stage-final"><span class="stage-index">04</span><div><small>Потенциал</small><strong>${packs.producedPacks} уп.</strong><p>По 160 г жмыха</p></div></div>
+          </div>
         </article>
-        <article class="product-card">
-          <div class="product-label"><span class="small">GROUNDLOOP / BATCH GL</span><strong class="big">COFFEE<br/>FIRE</strong><div class="line"></div><span class="small">8 РАЗЖИГАТЕЛЕЙ<br/>ИЗ КОФЕЙНОГО ЖМЫХА</span></div>
-          <div class="product-meta"><strong>Цифровой прототип продукта</strong><span>Рецептура и безопасность требуют испытаний партнёра</span></div>
+        <article class="panel attention-panel">
+          <div class="panel-header"><div><h2>Требует действия</h2><p>Очередь оператора на смену</p></div><span class="attention-count">${metrics.readyCount + pendingQuality + activeRoutes}</span></div>
+          <div class="action-list">
+            <button class="action-row" data-view-link="logistics"><span class="action-mark urgent"></span><div><strong>К вывозу: ${metrics.readyCount}</strong><small>${formatNumber(metrics.readyKg, 1)} кг на ${new Set(state.collections.filter((x)=>x.status==="ready").map((x)=>x.storeId)).size} точках</small></div><span class="row-arrow">→</span></button>
+            <button class="action-row" data-view-link="collections"><span class="action-mark review"></span><div><strong>Проверка качества: ${pendingQuality}</strong><small>Подтвердите состояние сырья</small></div><span class="row-arrow">→</span></button>
+            <button class="action-row" data-view-link="production"><span class="action-mark neutral"></span><div><strong>Без партии: ${unbatched.length}</strong><small>Собрано и ожидает приёмки</small></div><span class="row-arrow">→</span></button>
+          </div>
         </article>
       </section>
-      ${renderKpis(metrics)}
-      <section class="split-grid">
+      <section class="operations-grid lower-grid">
         <article class="panel">
-          <div class="panel-header"><div><h2>Последние записи</h2><p>Фактические и оценочные объёмы не смешиваются.</p></div><button class="button button-ghost button-small" data-view-link="collections">Все записи</button></div>
+          <div class="panel-header"><div><h2>Последние записи</h2><p>Фактические и оценочные объёмы разделены</p></div><button class="button button-ghost button-small" data-view-link="collections">Открыть журнал</button></div>
           <div class="table-wrap"><table><thead><tr><th>Точка</th><th>Дата</th><th>Напитки</th><th>Вес</th><th>Статус</th></tr></thead><tbody>
             ${recent.map((item) => `<tr><td><span class="table-title">${storeFor(item.storeId)?.name || item.storeName}</span><span class="table-sub">${item.id}</span></td><td>${formatDate(item.date)}</td><td>${formatNumber(item.cups)}</td><td>${formatNumber(item.wetKg, 1)} кг <span class="badge badge-${item.weightSource}">${sourceLabel(item.weightSource)}</span></td><td><span class="badge badge-${item.status}">${statusLabel(item.status)}</span></td></tr>`).join("")}
           </tbody></table></div>
         </article>
-        <article class="panel">
-          <div class="panel-header"><div><h2>Текущий материальный поток</h2><p>Расчёт по выбранному сценарию.</p></div></div>
-          <div class="stepper">
-            <div class="step-row"><span class="step-index">1</span><div><strong>Мокрый жмых</strong><p>Собранные и ожидающие вывоза записи</p></div><span class="step-stat">${workflowWet} кг</span></div>
-            <div class="step-row"><span class="step-index">2</span><div><strong>После сушки</strong><p>Ключевой технологический этап</p></div><span class="step-stat">${workflowDry.driedKg} кг</span></div>
-            <div class="step-row"><span class="step-index">3</span><div><strong>После контроля</strong><p>Брак исключён из производства</p></div><span class="step-stat">${workflowDry.acceptedKg} кг</span></div>
-            <div class="step-row"><span class="step-index">4</span><div><strong>Потенциальный выпуск</strong><p>По 160 г сухого жмыха на упаковку</p></div><span class="step-stat">${packs.producedPacks} уп.</span></div>
+        <article class="panel stores-panel">
+          <div class="panel-header"><div><h2>Точки пилота</h2><p>Ожидаемый и учтённый объём сегодня</p></div><span class="panel-meta">${activeStores.length} точек</span></div>
+          <div class="store-list">
+            ${activeStores.map((store) => {
+              const expected = estimateWetGroundsKg(store.avgCups, SCENARIOS[state.scenario].wetGramsPerCup);
+              const actual = state.collections.filter((x)=>x.storeId===store.id && x.date===TODAY && x.status!=="rejected").reduce((sum,x)=>sum+x.wetKg,0);
+              const pct = Math.min(100, Math.round((actual / Math.max(expected, .1))*100));
+              return `<div class="store-row"><div><strong>${store.name.replace("Global Coffee — ","")}</strong><small>${actual ? `${formatNumber(actual,1)} из ${formatNumber(expected,1)} кг` : `нет записи · ожидается ${formatNumber(expected,1)} кг`}</small></div><div class="store-progress"><span style="width:${pct}%"></span></div><span class="store-percent">${pct}%</span></div>`;
+            }).join("")}
           </div>
         </article>
       </section>
@@ -315,13 +332,13 @@ function renderLogistics() {
       ${syntheticNotice()}
       <section class="split-grid">
         <article class="route-card">
-          <div class="route-top"><div><p class="eyebrow" style="color:#d69a70">АВТОМАТИЧЕСКАЯ СБОРКА</p><h3>Следующий маршрут</h3></div><span class="badge badge-${routePreview.stops.length ? "scheduled" : "complete"}">${routePreview.stops.length ? `${routePreview.stops.length} остановки` : "нет заявок"}</span></div>
+          <div class="route-top"><div><p class="eyebrow">Сборка маршрута</p><h3>Следующий маршрут</h3></div><span class="badge badge-${routePreview.stops.length ? "scheduled" : "complete"}">${routePreview.stops.length ? `${routePreview.stops.length} остановки` : "нет заявок"}</span></div>
           <div class="route-metrics"><div class="route-metric"><span>Сырьё</span><strong>${routePreview.totalKg} кг</strong></div><div class="route-metric"><span>Дистанция</span><strong>${routePreview.distanceKm} км</strong></div><div class="route-metric"><span>Время</span><strong>${routePreview.estimatedMinutes} мин</strong></div></div>
           <div class="route-path">${routePreview.stops.length ? routePreview.stops.map((item, index) => `<span class="route-stop">${index+1}. ${(storeFor(item.storeId)?.name || item.storeName).replace("Global Coffee — ","")}</span>`).join("<span class='flow-arrow'>→</span>") : "<span style='color:rgba(255,255,255,.55)'>Добавьте записи со статусом «Готов к вывозу».</span>"}</div>
           <div style="margin-top:20px"><button class="button button-primary" data-action="create-route" ${!routePreview.stops.length ? "disabled" : ""}>Создать маршрут</button></div>
         </article>
         <article class="panel panel-pad">
-          <p class="eyebrow">ЛОГИКА MVP</p><h2 style="margin:8px 0 14px">Как система решает, когда ехать</h2>
+          <p class="eyebrow">Логика MVP</p><h2 style="margin:8px 0 14px">Как система решает, когда ехать</h2>
           <div class="assumption-list">
             <div class="assumption"><i></i><span>Контейнер отмечен готовым</span><strong>обязательно</strong></div>
             <div class="assumption"><i></i><span>Точки группируются по району</span><strong>автоматически</strong></div>
@@ -376,7 +393,7 @@ function renderSelectedBatch() {
   const sources = batch.sourceStores.map((id) => storeFor(id)?.name.replace("Global Coffee — ","") || id).join(", ");
   return `<section class="split-grid">
     <article class="panel panel-pad">
-      <p class="eyebrow">ВЫБРАННАЯ ПАРТИЯ</p><h2 style="margin:7px 0 18px">${batch.id}</h2>
+      <p class="eyebrow">Выбранная партия</p><h2 style="margin:7px 0 18px">${batch.id}</h2>
       <div class="form-grid">
         <label class="field">Сухой выход, %<input type="number" value="${batch.dryYieldPct}" disabled /></label>
         <label class="field">Брак, %<input type="number" value="${batch.rejectPct}" disabled /></label>
@@ -421,7 +438,7 @@ function renderEconomics() {
       <article class="breakdown"><div class="breakdown-row"><span>Выручка</span><strong>${formatMoney(e.revenue)}</strong></div><div class="breakdown-row"><span>Переменные расходы</span><strong>− ${formatMoney(e.variableCost)}</strong></div><div class="breakdown-row"><span>Логистика</span><strong>− ${formatMoney(p.monthlyLogisticsCost)}</strong></div><div class="breakdown-row"><span>Постоянные расходы</span><strong>− ${formatMoney(p.monthlyFixedCost)}</strong></div><div class="breakdown-row total"><span>Результат</span><strong>${formatMoney(e.profit)}</strong></div></article>
     </section>
     <section class="split-grid">
-      <article class="panel panel-pad"><p class="eyebrow">ИЗМЕНЯЕМЫЕ ПАРАМЕТРЫ</p><h2 style="margin:7px 0 18px">Проверьте любую гипотезу</h2>${ranges.map(([key,label,min,max,step,suffix]) => `<div class="range-field"><div class="range-head"><span>${label}</span><strong data-value-for="${key}">${formatNumber(p[key],0)}${suffix}</strong></div><input type="range" min="${min}" max="${max}" step="${step}" value="${p[key]}" data-economics-key="${key}" data-suffix="${suffix}" /></div>`).join("")}</article>
+      <article class="panel panel-pad"><p class="eyebrow">Параметры расчёта</p><h2 style="margin:7px 0 18px">Проверьте любую гипотезу</h2>${ranges.map(([key,label,min,max,step,suffix]) => `<div class="range-field"><div class="range-head"><span>${label}</span><strong data-value-for="${key}">${formatNumber(p[key],0)}${suffix}</strong></div><input type="range" min="${min}" max="${max}" step="${step}" value="${p[key]}" data-economics-key="${key}" data-suffix="${suffix}" /></div>`).join("")}</article>
       <article class="panel">
         <div class="panel-header"><div><h2>Материальный баланс / месяц</h2><p>Все формулы пересчитываются в реальном времени.</p></div></div>
         <div class="stepper">
@@ -444,7 +461,7 @@ function renderTraceability() {
   return `<div class="view-stack">
     <div class="panel panel-pad" style="display:flex;align-items:end;justify-content:space-between;gap:15px;flex-wrap:wrap"><label class="field" style="min-width:280px">Выберите партию<select id="passportBatch">${state.batches.map((b)=>`<option value="${b.id}" ${b.id===batch.id?"selected":""}>${b.id} · ${statusLabel(b.status)}</option>`).join("")}</select></label><span class="badge badge-${batch.status}">${statusLabel(batch.status)}</span></div>
     <section class="passport">
-      <div class="passport-cover" data-batch="${batch.id}"><p class="eyebrow" style="color:#d69a70">GROUNDLOOP / ПАСПОРТ ПРОИСХОЖДЕНИЯ</p><h2>${batch.id}</h2><p>Публичная страница для QR на упаковке. Показывает происхождение и фактический материальный баланс без неподтверждённых заявлений о CO₂.</p></div>
+      <div class="passport-cover" data-batch="${batch.id}"><p class="eyebrow">GroundLoop / паспорт происхождения</p><h2>${batch.id}</h2><p>Внутренний паспорт партии для сотрудников: точки происхождения, фактический вес, этап обработки и выпуск.</p></div>
       <div class="passport-grid">
         <div class="passport-section"><h3>Происхождение</h3>${stores.map((s)=>`<div class="passport-fact"><span>${s.name.replace("Global Coffee — ","")}</span><strong>${s.district}</strong></div>`).join("") || `<div class="passport-fact"><span>Источник</span><strong>не указан</strong></div>`}</div>
         <div class="passport-section"><h3>Материальный баланс</h3><div class="passport-fact"><span>Мокрый жмых</span><strong>${batch.wetKg} кг</strong></div><div class="passport-fact"><span>После сушки</span><strong>${batch.driedKg} кг</strong></div><div class="passport-fact"><span>Принято</span><strong>${batch.acceptedKg} кг</strong></div><div class="passport-fact"><span>Выпуск</span><strong>${batch.producedPacks ? `${batch.producedPacks} уп.` : "ожидается"}</strong></div></div>
@@ -460,12 +477,12 @@ function renderData() {
     ${syntheticNotice()}
     <section class="split-grid">
       <article class="panel panel-pad">
-        <p class="eyebrow">ИМПОРТ COYOTE</p><h2 style="margin:7px 0 16px">Загрузите CSV или Excel</h2>
+        <p class="eyebrow">Импорт Coyote</p><h2 style="margin:7px 0 16px">Загрузите CSV или Excel</h2>
         <div class="upload-zone" id="uploadZone"><div class="upload-icon">⇧</div><h3>Перетащите отчёт сюда</h3><p>Колонки: Точка, Дата, Напитки, Жмых кг. Вес можно не указывать — он будет рассчитан.</p><input type="file" id="fileInput" accept=".csv,.xlsx,.xls" hidden /><button class="button button-primary" data-action="choose-file">Выбрать файл</button></div>
         ${state.lastImport ? `<div class="notice" style="margin-top:15px"><span class="notice-dot"></span><div><strong>Последний импорт: ${state.lastImport.fileName}</strong>${state.lastImport.rows} строк · ${state.lastImport.at}</div></div>` : ""}
       </article>
       <article class="panel panel-pad">
-        <p class="eyebrow">УПРАВЛЕНИЕ</p><h2 style="margin:7px 0 16px">Переносимые данные</h2>
+        <p class="eyebrow">Управление данными</p><h2 style="margin:7px 0 16px">Переносимые данные</h2>
         <div class="data-actions"><button class="button button-dark" data-action="download-template">Скачать шаблон CSV</button><button class="button button-ghost" data-action="export-json">Экспорт JSON</button><button class="button button-ghost" data-action="reset-demo">Сбросить демо</button></div>
         <div class="assumption-list" style="margin-top:22px"><div class="assumption"><i></i><span>Текущий источник</span><strong>${state.dataMode === "synthetic" ? "Синтетика" : "Импорт"}</strong></div><div class="assumption"><i></i><span>Хранилище MVP</span><strong>Браузер</strong></div><div class="assumption"><i></i><span>Импортированных записей</span><strong>${state.collections.filter((x)=>x.source==="import").length}</strong></div><div class="assumption"><i></i><span>Готовность к API</span><strong>через адаптер</strong></div></div>
       </article>
