@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#201e1b" />
+    <meta name="theme-color" content="#f3f6f4" />
     <meta name="description" content="GroundLoop — внутренняя операционная консоль для учёта, сбора и переработки кофейного жмыха Global Coffee × Coyote." />
     <title>GroundLoop — операционный учёт жмыха</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -24,8 +24,8 @@
         <div class="brand-block">
           <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
           <div>
-            <p class="brand-name">GROUNDLOOP</p>
-            <p class="brand-subtitle">GLOBAL COFFEE × COYOTE</p>
+            <p class="brand-name">GroundLoop</p>
+            <p class="brand-subtitle">Global Coffee × Coyote</p>
           </div>
         </div>
 
@@ -42,10 +42,6 @@
         </nav>
 
         <div class="sidebar-footer">
-          <div class="workflow-mini">
-            <span>Чашка</span><i></i><span>Сбор</span><i></i><span>Продукт</span>
-          </div>
-          <p>Каждый килограмм виден от точки до партии</p>
           <a class="unslop-credit" href="https://github.com/heydamir/unslop" target="_blank" rel="noreferrer">Interface pass: Unslop by Damir Sokolovsky</a>
         </div>
       </aside>
@@ -54,13 +50,11 @@
         <header class="topbar">
           <button class="menu-button" id="menuButton" aria-label="Открыть меню">☰</button>
           <div>
-            <p class="eyebrow" id="viewEyebrow">Операционный центр</p>
             <h1 id="viewTitle">Обзор пилота</h1>
           </div>
           <div class="topbar-actions">
             <label class="scenario-select">
-              <span>Расчёт</span>
-              <select id="globalScenario">
+              <select id="globalScenario" aria-label="Сценарий расчёта">
                 <option value="conservative">Осторожный</option>
                 <option value="base" selected>Базовый</option>
                 <option value="optimistic">Оптимистичный</option>

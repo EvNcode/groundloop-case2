@@ -15,13 +15,13 @@ import {
 
 const TODAY = "2026-11-06";
 const viewMeta = {
-  overview: ["Операционный центр", "Смена и задачи"],
-  collections: ["Сырьё / точки", "Сбор на точках"],
-  logistics: ["Операции / маршруты", "Логистика сбора"],
-  production: ["Партии / переработка", "Производство"],
-  economics: ["Модель / сценарии", "Экономика проекта"],
-  traceability: ["Прослеживаемость / QR", "Паспорт партии"],
-  data: ["Источники / Coyote", "Данные и импорт"],
+  overview: "Смена и задачи",
+  collections: "Сбор на точках",
+  logistics: "Логистика",
+  production: "Производство",
+  economics: "Экономика",
+  traceability: "Паспорт партии",
+  data: "Данные",
 };
 
 function seedState() {
@@ -141,7 +141,6 @@ let toastTimer;
 
 const contentArea = document.querySelector("#contentArea");
 const viewTitle = document.querySelector("#viewTitle");
-const viewEyebrow = document.querySelector("#viewEyebrow");
 const globalScenario = document.querySelector("#globalScenario");
 const collectionDialog = document.querySelector("#collectionDialog");
 const collectionForm = document.querySelector("#collectionForm");
@@ -196,8 +195,7 @@ function syntheticNotice() {
   return `
     <div class="data-note">
       <span class="data-note-dot"></span>
-      <strong>Синтетические данные</strong>
-      <span>Все объёмы и цены заменяются реальными значениями без изменения процесса</span>
+      <strong>Демо · синтетические данные</strong>
     </div>`;
 }
 
@@ -252,7 +250,7 @@ function renderOverview() {
       ${renderKpis(metrics)}
       <section class="operations-grid">
         <article class="panel flow-panel">
-          <div class="panel-header"><div><h2>Материальный поток</h2><p>Расчёт по текущему циклу и выбранному сценарию</p></div><span class="panel-meta">обновлено 23:10</span></div>
+          <div class="panel-header"><div><h2>Поток материала</h2></div><span class="panel-meta">23:10</span></div>
           <div class="material-flow">
             <div class="material-stage"><span class="stage-index">01</span><div><small>На точках</small><strong>${formatNumber(workflowWet, 1)} кг</strong><p>Мокрый жмых</p></div></div>
             <span class="route-connector"></span>
@@ -264,23 +262,23 @@ function renderOverview() {
           </div>
         </article>
         <article class="panel attention-panel">
-          <div class="panel-header"><div><h2>Требует действия</h2><p>Очередь оператора на смену</p></div><span class="attention-count">${metrics.readyCount + pendingQuality + activeRoutes}</span></div>
+          <div class="panel-header"><div><h2>Задачи</h2></div><span class="attention-count">${metrics.readyCount + pendingQuality + activeRoutes}</span></div>
           <div class="action-list">
-            <button class="action-row" data-view-link="logistics"><span class="action-mark urgent"></span><div><strong>К вывозу: ${metrics.readyCount}</strong><small>${formatNumber(metrics.readyKg, 1)} кг на ${new Set(state.collections.filter((x)=>x.status==="ready").map((x)=>x.storeId)).size} точках</small></div><span class="row-arrow">→</span></button>
-            <button class="action-row" data-view-link="collections"><span class="action-mark review"></span><div><strong>Проверка качества: ${pendingQuality}</strong><small>Подтвердите состояние сырья</small></div><span class="row-arrow">→</span></button>
-            <button class="action-row" data-view-link="production"><span class="action-mark neutral"></span><div><strong>Без партии: ${unbatched.length}</strong><small>Собрано и ожидает приёмки</small></div><span class="row-arrow">→</span></button>
+            <button class="action-row" data-view-link="logistics"><span class="action-mark urgent"></span><div><strong>Вывоз · ${metrics.readyCount}</strong><small>${formatNumber(metrics.readyKg, 1)} кг</small></div><span class="row-arrow">→</span></button>
+            <button class="action-row" data-view-link="collections"><span class="action-mark review"></span><div><strong>Проверка · ${pendingQuality}</strong></div><span class="row-arrow">→</span></button>
+            <button class="action-row" data-view-link="production"><span class="action-mark neutral"></span><div><strong>Без партии · ${unbatched.length}</strong></div><span class="row-arrow">→</span></button>
           </div>
         </article>
       </section>
       <section class="operations-grid lower-grid">
         <article class="panel">
-          <div class="panel-header"><div><h2>Последние записи</h2><p>Фактические и оценочные объёмы разделены</p></div><button class="button button-ghost button-small" data-view-link="collections">Открыть журнал</button></div>
+          <div class="panel-header"><div><h2>Последние записи</h2></div><button class="button button-ghost button-small" data-view-link="collections">Все записи</button></div>
           <div class="table-wrap"><table><thead><tr><th>Точка</th><th>Дата</th><th>Напитки</th><th>Вес</th><th>Статус</th></tr></thead><tbody>
             ${recent.map((item) => `<tr><td><span class="table-title">${storeFor(item.storeId)?.name || item.storeName}</span><span class="table-sub">${item.id}</span></td><td>${formatDate(item.date)}</td><td>${formatNumber(item.cups)}</td><td>${formatNumber(item.wetKg, 1)} кг <span class="badge badge-${item.weightSource}">${sourceLabel(item.weightSource)}</span></td><td><span class="badge badge-${item.status}">${statusLabel(item.status)}</span></td></tr>`).join("")}
           </tbody></table></div>
         </article>
         <article class="panel stores-panel">
-          <div class="panel-header"><div><h2>Точки пилота</h2><p>Ожидаемый и учтённый объём сегодня</p></div><span class="panel-meta">${activeStores.length} точек</span></div>
+          <div class="panel-header"><div><h2>Точки</h2></div><span class="panel-meta">${activeStores.length}</span></div>
           <div class="store-list">
             ${activeStores.map((store) => {
               const expected = estimateWetGroundsKg(store.avgCups, SCENARIOS[state.scenario].wetGramsPerCup);
@@ -306,13 +304,13 @@ function renderCollections() {
         <article class="kpi-card"><div class="kpi-label">Отклонено</div><div class="kpi-value">${state.collections.filter((x) => x.status === "rejected").length}</div><div class="kpi-footer"><span>не попадёт в партию</span></div></article>
       </section>
       <section class="panel">
-        <div class="panel-header"><div><h2>Журнал сбора</h2><p>Новая запись сохраняется в браузере и сразу участвует в маршрутах.</p></div><button class="button button-primary" data-action="open-collection">+ Добавить</button></div>
+        <div class="panel-header"><div><h2>Журнал сбора</h2></div><button class="button button-primary" data-action="open-collection">Добавить</button></div>
         <div class="table-wrap"><table><thead><tr><th>ID</th><th>Точка</th><th>Дата</th><th>Продажи</th><th>Жмых</th><th>Качество</th><th>Статус</th></tr></thead><tbody>
           ${[...state.collections].sort((a,b) => b.date.localeCompare(a.date)).map((item) => `<tr><td>${item.id}</td><td><span class="table-title">${storeFor(item.storeId)?.name || item.storeName}</span><span class="table-sub">${storeFor(item.storeId)?.district || "Импорт"}</span></td><td>${formatDate(item.date)}</td><td>${formatNumber(item.cups)} напитков</td><td><strong>${formatNumber(item.wetKg,1)} кг</strong><span class="table-sub">${sourceLabel(item.weightSource)}</span></td><td><span class="badge badge-${item.quality}">${qualityLabel(item.quality)}</span></td><td><span class="badge badge-${item.status}">${statusLabel(item.status)}</span></td></tr>`).join("")}
         </tbody></table></div>
       </section>
       <section class="panel">
-        <div class="panel-header"><div><h2>Точки пилота</h2><p>Первые шесть точек включены; остальные готовы к масштабированию.</p></div><span class="badge badge-good">${activeStores.length} активных</span></div>
+        <div class="panel-header"><div><h2>Точки пилота</h2></div><span class="badge badge-good">${activeStores.length} активных</span></div>
         <div class="panel-pad triple-grid">
           ${activeStores.map((store) => {
             const entries = state.collections.filter((x) => x.storeId === store.id && x.status !== "rejected");
@@ -349,7 +347,7 @@ function renderLogistics() {
         </article>
       </section>
       <section class="panel">
-        <div class="panel-header"><div><h2>Маршруты</h2><p>Завершение маршрута переводит связанные записи в статус «Собрано».</p></div></div>
+        <div class="panel-header"><div><h2>Маршруты</h2></div></div>
         <div class="table-wrap"><table><thead><tr><th>Маршрут</th><th>Дата</th><th>Остановки</th><th>Вес</th><th>Дистанция</th><th>Статус</th><th></th></tr></thead><tbody>
           ${routes.map((route) => {
             const items = state.collections.filter((x) => route.collectionIds.includes(x.id));
@@ -373,7 +371,7 @@ function renderProduction() {
         <article class="kpi-card"><div class="kpi-label">Базовый сухой выход</div><div class="kpi-value">${SCENARIOS[state.scenario].dryYieldPct}%</div><div class="kpi-footer"><span>редактируется в экономике</span></div></article>
       </section>
       <section class="panel">
-        <div class="panel-header"><div><h2>Партии сырья</h2><p>Собранные записи объединяются в одну прослеживаемую партию.</p></div><button class="button button-primary" data-action="create-batch" ${!unbatched.length ? "disabled" : ""}>Сформировать партию</button></div>
+        <div class="panel-header"><div><h2>Партии</h2></div><button class="button button-primary" data-action="create-batch" ${!unbatched.length ? "disabled" : ""}>Новая партия</button></div>
         <div class="panel-pad triple-grid">
           ${state.batches.map((batch) => `<article class="batch-card ${batch.id === state.selectedBatchId ? "selected" : ""}">
             <div class="batch-head"><div><h3>${batch.id}</h3><span class="table-sub">${formatDate(batch.createdAt)} · ${batch.sourceStores.length} точки</span></div><span class="badge badge-${batch.status}">${statusLabel(batch.status)}</span></div>
@@ -404,7 +402,7 @@ function renderSelectedBatch() {
       <div style="margin-top:16px;display:flex;gap:9px"><button class="button button-primary" data-action="create-run" data-id="${batch.id}" ${batch.status !== "complete" || batch.producedPacks ? "disabled" : ""}>Зафиксировать выпуск</button><button class="button button-ghost" data-view-link="traceability">Паспорт партии</button></div>
     </article>
     <article class="panel">
-      <div class="panel-header"><div><h2>Производственная схема</h2><p>Технологические параметры пока являются гипотезами.</p></div></div>
+      <div class="panel-header"><div><h2>Этапы</h2></div></div>
       <div class="stepper">
         <div class="step-row"><span class="step-index">1</span><div><strong>Приёмка</strong><p>Вес и происхождение партии</p></div><span class="step-stat">${batch.wetKg} кг</span></div>
         <div class="step-row"><span class="step-index">2</span><div><strong>Сушка</strong><p>Контроль влажности партнёром</p></div><span class="step-stat">${batch.driedKg} кг</span></div>
@@ -440,7 +438,7 @@ function renderEconomics() {
     <section class="split-grid">
       <article class="panel panel-pad"><p class="eyebrow">Параметры расчёта</p><h2 style="margin:7px 0 18px">Проверьте любую гипотезу</h2>${ranges.map(([key,label,min,max,step,suffix]) => `<div class="range-field"><div class="range-head"><span>${label}</span><strong data-value-for="${key}">${formatNumber(p[key],0)}${suffix}</strong></div><input type="range" min="${min}" max="${max}" step="${step}" value="${p[key]}" data-economics-key="${key}" data-suffix="${suffix}" /></div>`).join("")}</article>
       <article class="panel">
-        <div class="panel-header"><div><h2>Материальный баланс / месяц</h2><p>Все формулы пересчитываются в реальном времени.</p></div></div>
+        <div class="panel-header"><div><h2>Баланс за месяц</h2></div></div>
         <div class="stepper">
           <div class="step-row"><span class="step-index">1</span><div><strong>Проданные напитки</strong><p>${p.activeStores} точек × ${p.cupsPerStoreDay} × 30 дней</p></div><span class="step-stat">${formatNumber(p.activeStores*p.cupsPerStoreDay*30)}</span></div>
           <div class="step-row"><span class="step-index">2</span><div><strong>Мокрый жмых</strong><p>${p.wetGramsPerCup} г на напиток</p></div><span class="step-stat">${formatNumber(e.wetKg,0)} кг</span></div>
@@ -461,7 +459,7 @@ function renderTraceability() {
   return `<div class="view-stack">
     <div class="panel panel-pad" style="display:flex;align-items:end;justify-content:space-between;gap:15px;flex-wrap:wrap"><label class="field" style="min-width:280px">Выберите партию<select id="passportBatch">${state.batches.map((b)=>`<option value="${b.id}" ${b.id===batch.id?"selected":""}>${b.id} · ${statusLabel(b.status)}</option>`).join("")}</select></label><span class="badge badge-${batch.status}">${statusLabel(batch.status)}</span></div>
     <section class="passport">
-      <div class="passport-cover" data-batch="${batch.id}"><p class="eyebrow">GroundLoop / паспорт происхождения</p><h2>${batch.id}</h2><p>Внутренний паспорт партии для сотрудников: точки происхождения, фактический вес, этап обработки и выпуск.</p></div>
+      <div class="passport-cover" data-batch="${batch.id}"><p class="eyebrow">Паспорт партии</p><h2>${batch.id}</h2></div>
       <div class="passport-grid">
         <div class="passport-section"><h3>Происхождение</h3>${stores.map((s)=>`<div class="passport-fact"><span>${s.name.replace("Global Coffee — ","")}</span><strong>${s.district}</strong></div>`).join("") || `<div class="passport-fact"><span>Источник</span><strong>не указан</strong></div>`}</div>
         <div class="passport-section"><h3>Материальный баланс</h3><div class="passport-fact"><span>Мокрый жмых</span><strong>${batch.wetKg} кг</strong></div><div class="passport-fact"><span>После сушки</span><strong>${batch.driedKg} кг</strong></div><div class="passport-fact"><span>Принято</span><strong>${batch.acceptedKg} кг</strong></div><div class="passport-fact"><span>Выпуск</span><strong>${batch.producedPacks ? `${batch.producedPacks} уп.` : "ожидается"}</strong></div></div>
@@ -488,16 +486,14 @@ function renderData() {
       </article>
     </section>
     <section class="panel">
-      <div class="panel-header"><div><h2>Ожидаемый формат</h2><p>Названия колонок распознаются на русском и английском.</p></div></div>
+      <div class="panel-header"><div><h2>Формат файла</h2></div></div>
       <div class="table-wrap"><table><thead><tr><th>Точка</th><th>Дата</th><th>Напитки</th><th>Жмых кг</th><th>Что произойдёт</th></tr></thead><tbody><tr><td>Global Coffee — Абая</td><td>2026-11-06</td><td>238</td><td>7.7</td><td>Вес отмечается как измеренный</td></tr><tr><td>Global Coffee — Mega</td><td>2026-11-06</td><td>326</td><td>пусто</td><td>Вес оценивается по сценарию</td></tr></tbody></table></div>
     </section>
   </div>`;
 }
 
 function render() {
-  const [eyebrow, title] = viewMeta[state.currentView] || viewMeta.overview;
-  viewEyebrow.textContent = eyebrow;
-  viewTitle.textContent = title;
+  viewTitle.textContent = viewMeta[state.currentView] || viewMeta.overview;
   globalScenario.value = state.scenario;
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === state.currentView));
   const renderers = { overview: renderOverview, collections: renderCollections, logistics: renderLogistics, production: renderProduction, economics: renderEconomics, traceability: renderTraceability, data: renderData };
