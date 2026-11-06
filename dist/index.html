@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#102433" />
+    <meta name="description" content="GroundLoop — рабочий MVP для учёта и переработки кофейного жмыха Global Coffee × Coyote." />
+    <title>GroundLoop — кофейный жмых в новый продукт</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&amp;family=Unbounded:wght@600;700&amp;display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script>
+      window.__groundloopErrors = [];
+      window.addEventListener("error", (event) => window.__groundloopErrors.push(event.message || "Unknown error"));
+      window.addEventListener("unhandledrejection", (event) => window.__groundloopErrors.push(String(event.reason || "Unhandled rejection")));
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div>
+            <p class="brand-name">GROUNDLOOP</p>
+            <p class="brand-subtitle">GLOBAL COFFEE × COYOTE</p>
+          </div>
+        </div>
+
+        <div class="mode-pill"><span></span> Демо на синтетических данных</div>
+
+        <nav class="main-nav" aria-label="Основная навигация">
+          <button class="nav-item active" data-view="overview"><b>01</b><span>Обзор</span></button>
+          <button class="nav-item" data-view="collections"><b>02</b><span>Сбор на точках</span></button>
+          <button class="nav-item" data-view="logistics"><b>03</b><span>Логистика</span></button>
+          <button class="nav-item" data-view="production"><b>04</b><span>Производство</span></button>
+          <button class="nav-item" data-view="economics"><b>05</b><span>Экономика</span></button>
+          <button class="nav-item" data-view="traceability"><b>06</b><span>Паспорт партии</span></button>
+          <button class="nav-item" data-view="data"><b>07</b><span>Данные</span></button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="workflow-mini">
+            <span>Чашка</span><i></i><span>Сбор</span><i></i><span>Продукт</span>
+          </div>
+          <p>Каждый килограмм виден от точки до продажи.</p>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <button class="menu-button" id="menuButton" aria-label="Открыть меню">☰</button>
+          <div>
+            <p class="eyebrow" id="viewEyebrow">GROUNDLOOP / ОПЕРАЦИОННЫЙ ЦЕНТР</p>
+            <h1 id="viewTitle">Обзор пилота</h1>
+          </div>
+          <div class="topbar-actions">
+            <label class="scenario-select">
+              <span>Сценарий</span>
+              <select id="globalScenario">
+                <option value="conservative">Осторожный</option>
+                <option value="base" selected>Базовый</option>
+                <option value="optimistic">Оптимистичный</option>
+              </select>
+            </label>
+            <button class="button button-primary" data-action="open-collection">+ Новый сбор</button>
+          </div>
+        </header>
+
+        <div class="content-area" id="contentArea" aria-live="polite"></div>
+      </main>
+    </div>
+
+    <dialog id="collectionDialog" class="dialog">
+      <form method="dialog" id="collectionForm">
+        <div class="dialog-header">
+          <div>
+            <p class="eyebrow">НОВАЯ ЗАПИСЬ</p>
+            <h2>Сбор жмыха на точке</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="Закрыть">×</button>
+        </div>
+        <div class="form-grid">
+          <label class="field field-wide">Точка
+            <select name="storeId" id="collectionStore" required></select>
+          </label>
+          <label class="field">Дата
+            <input type="date" name="date" id="collectionDate" required />
+          </label>
+          <label class="field">Продано напитков
+            <input type="number" name="cups" min="0" step="1" value="180" required />
+          </label>
+          <label class="field">Фактический вес, кг
+            <input type="number" name="wetKg" min="0" step="0.1" placeholder="Оставьте пустым для оценки" />
+          </label>
+          <label class="field">Качество сырья
+            <select name="quality">
+              <option value="good">Чистое, без примесей</option>
+              <option value="pending">Нужна проверка</option>
+              <option value="rejected">Загрязнено</option>
+            </select>
+          </label>
+          <label class="field field-wide">Комментарий
+            <textarea name="note" rows="3" placeholder="Например: контейнер заполнен на 80%"></textarea>
+          </label>
+        </div>
+        <div class="dialog-note">Если вес не указан, система оценит его по числу напитков и допущению выбранного сценария.</div>
+        <div class="dialog-actions">
+          <button class="button button-ghost" value="cancel">Отмена</button>
+          <button class="button button-primary" value="default" type="submit">Сохранить сбор</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status"></div>
+  </body>
+</html>

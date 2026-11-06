@@ -1,0 +1,10 @@
+{
+  "name": "groundloop",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "GroundLoop hackathon MVP for coffee grounds collection, processing and unit economics.",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  }
+}
