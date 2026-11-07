@@ -161,6 +161,17 @@ export async function readWorkspace() {
   return rows[0] || null;
 }
 
+export async function readWorkspaceHistory() {
+  return request("/rest/v1/groundloop_workspace_history?workspace_id=eq.pilot&select=revision,changed_at,actor_email,changed_sections&order=revision.desc&limit=20", {}, await token());
+}
+
+export async function readWorkspaceSnapshot(revision) {
+  if (!Number.isSafeInteger(Number(revision)) || Number(revision) < 1) throw new Error("Неверная версия");
+  const rows = await request(`/rest/v1/groundloop_workspace_history?workspace_id=eq.pilot&revision=eq.${Number(revision)}&select=state&limit=1`, {}, await token());
+  if (!rows.length) throw new Error("Версия не найдена");
+  return rows[0].state;
+}
+
 export async function createWorkspace(state, userId) {
   const rows = await request("/rest/v1/groundloop_workspace", {
     method: "POST", headers: { Prefer: "return=representation" },
@@ -174,6 +185,10 @@ export async function updateWorkspace(state, revision, userId) {
     method: "PATCH", headers: { Prefer: "return=representation" },
     body: JSON.stringify({ state, revision: revision + 1, updated_by: userId, updated_at: new Date().toISOString() }),
   }, await token());
-  if (!rows.length) throw new Error("Данные изменились у другого сотрудника. Обновите страницу перед повтором");
+  if (!rows.length) {
+    const error = new Error("Данные изменились у другого сотрудника");
+    error.code = "conflict";
+    throw error;
+  }
   return rows[0].revision;
 }

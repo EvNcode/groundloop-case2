@@ -9,10 +9,12 @@ import {
   formatMoney,
   formatNumber,
   normalizeImportedRows,
+  mergeWorkspaceState,
+  sameValue,
   parseCsv,
   round,
 } from "./logic.js";
-import { cloudEnabled, restoreSession, signIn, signUp, requestPasswordRecovery, signOut, acceptInviteSession, updatePassword, getMembership, requestTeamAccess, listTeam, approveTeamAccess, updateTeamRole, readWorkspace, createWorkspace, updateWorkspace } from "./cloud.js";
+import { cloudEnabled, restoreSession, signIn, signUp, requestPasswordRecovery, signOut, acceptInviteSession, updatePassword, getMembership, requestTeamAccess, listTeam, approveTeamAccess, updateTeamRole, readWorkspace, readWorkspaceHistory, readWorkspaceSnapshot, createWorkspace, updateWorkspace } from "./cloud.js";
 
 const TODAY = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Qyzylorda", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const viewMeta = {
@@ -156,7 +158,10 @@ let cloudRole = null;
 let cloudRevision = 0;
 let saveQueue = Promise.resolve();
 let cloudSaveBlocked = false;
+let cloudBaseState = null;
+let lastQueuedState = null;
 let teamData = { members: [], requests: [] };
+let historyRows = [];
 
 const contentArea = document.querySelector("#contentArea");
 const viewTitle = document.querySelector("#viewTitle");
@@ -175,17 +180,52 @@ function saveState() {
   if (!cloudUser || cloudRole === "viewer" || cloudSaveBlocked) return;
   const snapshot = structuredClone(state);
   snapshot.currentView = "overview";
+  snapshot.selectedBatchId = cloudBaseState?.selectedBatchId || snapshot.selectedBatchId;
+  const before = lastQueuedState || cloudBaseState;
+  if (sameValue(before, snapshot)) return;
+  lastQueuedState = structuredClone(snapshot);
   document.querySelector("#syncStatus").textContent = "Сохранение…";
   saveQueue = saveQueue.then(async () => {
     if (cloudSaveBlocked) return;
-    cloudRevision = await updateWorkspace(snapshot, cloudRevision, cloudUser.id);
-    document.querySelector("#syncStatus").textContent = "Сохранено";
+    let merged = false;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const candidate = mergeWorkspaceState(before, snapshot, cloudBaseState);
+      try {
+        const revision = await updateWorkspace(candidate, cloudRevision, cloudUser.id);
+        cloudRevision = revision;
+        cloudBaseState = structuredClone(candidate);
+        if (lastQueuedState === snapshot || sameValue(lastQueuedState, snapshot)) {
+          const currentSnapshot = structuredClone(state);
+          currentSnapshot.currentView = "overview";
+          currentSnapshot.selectedBatchId = snapshot.selectedBatchId;
+          if (sameValue(currentSnapshot, snapshot) && !sameValue(candidate, snapshot)) {
+            const currentView = state.currentView;
+            const selectedBatchId = state.selectedBatchId;
+            state = hydrateState({ ...candidate, currentView, selectedBatchId });
+            render();
+          }
+        }
+        document.querySelector("#syncStatus").textContent = merged ? "Объединено и сохранено" : "Сохранено";
+        if (state.currentView === "data") void refreshHistory().catch((error) => showToast(error.message));
+        return;
+      } catch (error) {
+        if (error.code !== "conflict" || attempt === 2) throw error;
+        const remote = await readWorkspace();
+        if (!remote) throw new Error("Рабочее пространство недоступно");
+        cloudRevision = remote.revision;
+        cloudBaseState = structuredClone(remote.state);
+        cloudBaseState.currentView = "overview";
+        cloudBaseState.selectedBatchId = before.selectedBatchId;
+        merged = true;
+      }
+    }
   }).catch((error) => {
     cloudSaveBlocked = true;
     document.querySelector("#syncStatus").textContent = "Не сохранено · обновите данные";
     render();
     showToast(`${error.message}. Обновите данные перед продолжением.`);
   });
+  return saveQueue;
 }
 
 function h(value) {
@@ -258,15 +298,7 @@ function dashboardMetrics() {
   const ready = relevant.filter((item) => item.status === "ready" && item.quality === "good");
   const measured = relevant.filter((item) => item.weightSource === "measured").length;
   const active = state.stores.filter((store) => store.active);
-  const avgCups = active.length ? active.reduce((sum, store) => sum + store.avgCups, 0) / active.length : 0;
-  const scenario = SCENARIOS[state.scenario];
-  const economics = calculateEconomics({
-    activeStores: active.length,
-    cupsPerStoreDay: avgCups,
-    daysPerMonth: 30,
-    groundsPerPackG: 160,
-    ...scenario,
-  });
+  const economics = calculateEconomics(state.economicsParams);
   return {
     activeStores: active.length,
     wetKg,
@@ -281,8 +313,8 @@ function renderOverview() {
   const metrics = dashboardMetrics();
   const recent = [...state.collections].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6);
   const workflowWet = round(state.collections.filter((x) => x.status !== "rejected" && x.quality === "good").reduce((s, x) => s + x.wetKg, 0), 1);
-  const workflowDry = calculateDryOutput(workflowWet, SCENARIOS[state.scenario].dryYieldPct, SCENARIOS[state.scenario].rejectPct);
-  const packs = calculatePackOutput(workflowDry.acceptedKg, 160, 100);
+  const workflowDry = calculateDryOutput(workflowWet, state.economicsParams.dryYieldPct, state.economicsParams.rejectPct);
+  const packs = calculatePackOutput(workflowDry.acceptedKg, state.economicsParams.groundsPerPackG, 100);
   const pendingQuality = state.collections.filter((x) => x.quality === "pending").length;
   const activeRoutes = state.routes.filter((x) => x.status === "planned").length;
   const unbatched = state.collections.filter((x) => x.status === "collected" && !state.batches.some((b) => b.collectionIds.includes(x.id)));
@@ -297,11 +329,11 @@ function renderOverview() {
           <div class="material-flow">
             <div class="material-stage"><span class="stage-index">01</span><div><small>На точках</small><strong>${formatNumber(workflowWet, 1)} кг</strong><p>Мокрый жмых</p></div></div>
             <span class="route-connector"></span>
-            <div class="material-stage"><span class="stage-index">02</span><div><small>После сушки</small><strong>${formatNumber(workflowDry.driedKg, 1)} кг</strong><p>${SCENARIOS[state.scenario].dryYieldPct}% выхода</p></div></div>
+            <div class="material-stage"><span class="stage-index">02</span><div><small>После сушки</small><strong>${formatNumber(workflowDry.driedKg, 1)} кг</strong><p>${formatNumber(state.economicsParams.dryYieldPct)}% выхода</p></div></div>
             <span class="route-connector"></span>
             <div class="material-stage"><span class="stage-index">03</span><div><small>Принято</small><strong>${formatNumber(workflowDry.acceptedKg, 1)} кг</strong><p>После контроля</p></div></div>
             <span class="route-connector"></span>
-            <div class="material-stage material-stage-final"><span class="stage-index">04</span><div><small>Потенциал</small><strong>${packs.producedPacks} уп.</strong><p>По 160 г жмыха</p></div></div>
+            <div class="material-stage material-stage-final"><span class="stage-index">04</span><div><small>Потенциал</small><strong>${packs.producedPacks} уп.</strong><p>По ${formatNumber(state.economicsParams.groundsPerPackG)} г жмыха</p></div></div>
           </div>
         </article>
         <article class="panel attention-panel">
@@ -324,7 +356,7 @@ function renderOverview() {
           <div class="panel-header"><div><h2>Точки</h2></div><span class="panel-meta">${activeStores.length}</span></div>
           <div class="store-list">
             ${activeStores.map((store) => {
-              const expected = estimateWetGroundsKg(store.avgCups, SCENARIOS[state.scenario].wetGramsPerCup);
+              const expected = estimateWetGroundsKg(store.avgCups, state.economicsParams.wetGramsPerCup);
               const actual = state.collections.filter((x)=>x.storeId===store.id && x.date===TODAY && x.status!=="rejected").reduce((sum,x)=>sum+x.wetKg,0);
               const pct = Math.min(100, Math.round((actual / Math.max(expected, .1))*100));
               return `<div class="store-row"><div><strong>${h(store.name.replace("Global Coffee — ",""))}</strong><small>${actual ? `${formatNumber(actual,1)} из ${formatNumber(expected,1)} кг` : `нет записи · ожидается ${formatNumber(expected,1)} кг`}</small></div><div class="store-progress"><span style="width:${pct}%"></span></div><span class="store-percent">${pct}%</span></div>`;
@@ -411,7 +443,7 @@ function renderProduction() {
         <article class="kpi-card"><div class="kpi-label">Собрано без партии</div><div class="kpi-value">${round(unbatched.reduce((s,x)=>s+x.wetKg,0),1)} кг</div><div class="kpi-footer"><span>${unbatched.length} записей</span></div></article>
         <article class="kpi-card"><div class="kpi-label">Партий</div><div class="kpi-value">${state.batches.length}</div><div class="kpi-footer"><span>полная прослеживаемость</span></div></article>
         <article class="kpi-card"><div class="kpi-label">Готовой продукции</div><div class="kpi-value">${formatNumber(state.productionRuns.reduce((s,x)=>s+Number(x.producedPacks || 0),0))}</div><div class="kpi-footer"><span>упаковок в демо</span></div></article>
-        <article class="kpi-card"><div class="kpi-label">Базовый сухой выход</div><div class="kpi-value">${SCENARIOS[state.scenario].dryYieldPct}%</div><div class="kpi-footer"><span>редактируется в экономике</span></div></article>
+        <article class="kpi-card"><div class="kpi-label">Сухой выход модели</div><div class="kpi-value">${formatNumber(state.economicsParams.dryYieldPct)}%</div><div class="kpi-footer"><span>редактируется в экономике</span></div></article>
       </section>
       <section class="panel">
         <div class="panel-header"><div><h2>Партии</h2></div><button class="button button-primary" data-action="create-batch" ${!unbatched.length ? "disabled" : ""}>Новая партия</button></div>
@@ -489,7 +521,7 @@ function renderEconomics() {
           <div class="step-row"><span class="step-index">4</span><div><strong>Произведено</strong><p>${h(p.groundsPerPackG)} г жмыха на упаковку</p></div><span class="step-stat">${formatNumber(e.producedPacks)} уп.</span></div>
           <div class="step-row"><span class="step-index">5</span><div><strong>Продано</strong><p>Коэффициент реализации ${h(p.sellThroughPct)}%</p></div><span class="step-stat">${formatNumber(e.soldPacks)} уп.</span></div>
         </div>
-        <div class="panel-pad" style="padding-top:0"><div class="notice"><span class="notice-dot"></span><div><strong>Точка безубыточности</strong>${formatNumber(e.breakEvenPacks)} проданных упаковок в месяц при текущей цене и себестоимости.</div></div></div>
+        <div class="panel-pad" style="padding-top:0"><div class="notice"><span class="notice-dot"></span><div><strong>Точка безубыточности</strong>${e.breakEvenPacks === null ? "Недоступна при нулевой цене." : `${formatNumber(e.breakEvenPacks)} проданных упаковок из ${formatNumber(e.producedPacks)} произведённых.${e.breakEvenPacks > e.producedPacks ? " Текущего объёма недостаточно." : ""}`}</div></div></div>
       </article>
     </section>
   </div>`;
@@ -514,6 +546,8 @@ function renderTraceability() {
 }
 
 function renderData() {
+  const sectionLabels = { baseline: "Начальное состояние", created: "Создание", stores: "Точки", collections: "Сбор", routes: "Маршруты", batches: "Партии", productionRuns: "Выпуск", economicsParams: "Экономика", scenario: "Сценарий", dataMode: "Источник" };
+  const changedLabel = (row) => (row.changed_sections || []).map((section) => sectionLabels[section] || section).join(", ") || "Данные";
   return `<div class="view-stack">
     ${syntheticNotice()}
     <section class="split-grid">
@@ -528,6 +562,7 @@ function renderData() {
         <div class="assumption-list" style="margin-top:22px"><div class="assumption"><i></i><span>Текущий источник</span><strong>${state.dataMode === "synthetic" ? "Синтетика" : "Импорт + демо"}</strong></div><div class="assumption"><i></i><span>Хранилище</span><strong>${cloudEnabled ? "Supabase" : "Браузер"}</strong></div><div class="assumption"><i></i><span>Импортированных записей</span><strong>${state.collections.filter((x)=>x.source==="import").length}</strong></div></div>
       </article>
     </section>
+    ${cloudEnabled ? `<section class="panel"><div class="panel-header"><div><h2>История изменений</h2><p class="table-sub">Новые версии сохраняются в базе. Восстановление создаёт следующую версию.</p></div></div><div class="table-wrap"><table><thead><tr><th>Версия</th><th>Когда</th><th>Сотрудник</th><th>Изменено</th><th></th></tr></thead><tbody>${historyRows.map((row) => `<tr><td>${formatNumber(row.revision)}</td><td>${new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short", timeZone: "Asia/Qyzylorda" }).format(new Date(row.changed_at))}</td><td>${h(row.actor_email || "Система")}</td><td>${h(changedLabel(row))}</td><td>${cloudRole === "admin" && Number(row.revision) !== Number(cloudRevision) ? `<button class="button button-ghost button-small" data-action="restore-revision" data-id="${Number(row.revision)}">Восстановить</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5"><div class="empty-state"><strong>История загружается</strong></div></td></tr>`}</tbody></table></div></section>` : ""}
     <section class="panel">
       <div class="panel-header"><div><h2>Формат файла</h2></div></div>
       <div class="table-wrap"><table><thead><tr><th>Точка</th><th>Дата</th><th>Напитки</th><th>Жмых кг</th><th>Что произойдёт</th></tr></thead><tbody><tr><td>Global Coffee — Абая</td><td>2026-11-06</td><td>238</td><td>7.7</td><td>Вес отмечается как измеренный</td></tr><tr><td>Global Coffee — Mega</td><td>2026-11-06</td><td>326</td><td>пусто</td><td>Вес оценивается по сценарию</td></tr></tbody></table></div>
@@ -572,8 +607,26 @@ function setView(view) {
   state.currentView = view;
   if (!cloudEnabled) saveState();
   render();
+  if (view === "data" && cloudEnabled && cloudUser) void refreshHistory().catch((error) => showToast(error.message));
   window.scrollTo({ top: 0, behavior: "smooth" });
   document.querySelector("#sidebar").classList.remove("open");
+}
+
+async function refreshHistory() {
+  historyRows = await readWorkspaceHistory();
+  if (state.currentView === "data") render();
+}
+
+async function restoreRevision(revision) {
+  if (cloudRole !== "admin" || cloudSaveBlocked) return;
+  if (!window.confirm(`Восстановить данные версии ${revision}? Текущая версия останется в истории.`)) return;
+  try {
+    const historical = await readWorkspaceSnapshot(Number(revision));
+    state = hydrateState({ ...historical, currentView: "data" });
+    render();
+    await saveState();
+    if (!cloudSaveBlocked) showToast(`Данные версии ${revision} восстановлены.`);
+  } catch (error) { showToast(error.message); }
 }
 
 function openCollectionDialog() {
@@ -626,13 +679,13 @@ function createBatch() {
   const items = state.collections.filter((x) => x.status === "collected" && !x.batchId && !state.batches.some((b)=>b.collectionIds.includes(x.id)));
   if (!items.length) return showToast("Нет собранных записей без партии.");
   const wetKg = round(items.reduce((s,x)=>s+x.wetKg,0),2);
-  const scenario = SCENARIOS[state.scenario];
-  const dry = calculateDryOutput(wetKg, scenario.dryYieldPct, scenario.rejectPct);
+  const process = state.economicsParams;
+  const dry = calculateDryOutput(wetKg, process.dryYieldPct, process.rejectPct);
   const id = `GL-${TODAY.slice(2).replaceAll("-","")}-${String.fromCharCode(65+state.batches.length)}`;
   const batch = {
     id, createdAt: TODAY, collectionIds: items.map((x)=>x.id), sourceStores: [...new Set(items.map((x)=>x.storeId))], wetKg,
-    dryYieldPct: scenario.dryYieldPct, rejectPct: scenario.rejectPct, driedKg: dry.driedKg, acceptedKg: dry.acceptedKg,
-    status: "received", groundsPerPackG: 160, producedPacks: 0, recipe: "R-01 / тестовая рецептура",
+    dryYieldPct: process.dryYieldPct, rejectPct: process.rejectPct, driedKg: dry.driedKg, acceptedKg: dry.acceptedKg,
+    status: "received", groundsPerPackG: process.groundsPerPackG, producedPacks: 0, recipe: "R-01 / тестовая рецептура",
   };
   state.batches.unshift(batch);
   state.collections = state.collections.map((x)=>items.some((i)=>i.id===x.id)?{...x,batchId:id}:x);
@@ -682,22 +735,27 @@ async function importFile(file) {
       rows = window.XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: "", raw: true });
     }
     if (rows.length > 5000) throw new Error("В файле больше 5000 строк. Разделите отчёт на части.");
-    const normalized = normalizeImportedRows(rows, { wetGramsPerCup: SCENARIOS[state.scenario].wetGramsPerCup });
+    const normalized = normalizeImportedRows(rows, { wetGramsPerCup: state.economicsParams.wetGramsPerCup });
     if (!normalized.length) throw new Error("Не найдены строки с количеством напитков или весом.");
     const existingIds = new Set(state.collections.map((item) => item.id));
     const fresh = normalized.map((item, index) => ({ ...item, id: `IMP-${fingerprint}-${index + 1}` })).filter((item) => !existingIds.has(item.id));
     if (!fresh.length) return showToast("Этот файл уже импортирован. Новых записей нет.");
+    const next = structuredClone(state);
     fresh.forEach((item) => {
-      let store = state.stores.find((s)=>s.name.trim().toLowerCase()===item.storeName.toLowerCase());
+      let store = next.stores.find((s)=>s.name.trim().toLowerCase()===item.storeName.toLowerCase());
       if (!store) {
-        store = { id:`IMP-S-${state.stores.length+1}`, name:item.storeName, district:"Импорт", avgCups:item.cups, active:true };
-        state.stores.push(store);
+        store = { id:`IMP-S-${crypto.randomUUID().slice(0, 8)}`, name:item.storeName, district:"Импорт", avgCups:item.cups, active:true };
+        next.stores.push(store);
       }
-      state.collections.push({ ...item, storeId:store.id });
+      next.collections.push({ ...item, storeId:store.id });
     });
-    state.dataMode = "mixed";
-    state.lastImport = { fileName:file.name, rows:fresh.length, at:new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short",timeZone:"Asia/Qyzylorda"}).format(new Date()) };
-    saveState(); render(); showToast(`Импортировано ${fresh.length} строк. Проверьте качество перед вывозом.`);
+    next.dataMode = "mixed";
+    next.lastImport = { fileName:file.name, rows:fresh.length, at:new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short",timeZone:"Asia/Qyzylorda"}).format(new Date()) };
+    if (new TextEncoder().encode(JSON.stringify(next)).length > 2097152) throw new Error("Объём пилота превысит 2 МБ. Разделите данные или перенесите архив в отдельный проект.");
+    state = next;
+    render();
+    await saveState();
+    if (!cloudSaveBlocked) showToast(`Импортировано ${fresh.length} строк. Проверьте качество перед вывозом.`);
   } catch (error) {
     showToast(error.message || "Не удалось импортировать файл.");
   }
@@ -766,6 +824,7 @@ contentArea.addEventListener("click", (event) => {
   if (action === "approve-collection") reviewCollection(id, true);
   if (action === "reject-collection") reviewCollection(id, false);
   if (action === "approve-member") void approveMember(id, button);
+  if (action === "restore-revision") void restoreRevision(id);
   if (action === "complete-route") completeRoute(id);
   if (action === "create-batch") createBatch();
   if (action === "advance-batch") advanceBatch(id);
@@ -790,7 +849,7 @@ collectionForm.addEventListener("submit", (event) => {
   const enteredWeight = Number(data.get("wetKg"));
   if ((!cups && !enteredWeight) || cups < 0 || enteredWeight < 0 || !state.stores.some((store) => store.active && store.id === storeId)) return showToast("Укажите точку и количество напитков или вес больше нуля.");
   const estimated = !enteredWeight;
-  const wetKg = enteredWeight || estimateWetGroundsKg(cups, SCENARIOS[state.scenario].wetGramsPerCup);
+  const wetKg = enteredWeight || estimateWetGroundsKg(cups, state.economicsParams.wetGramsPerCup);
   const quality = data.get("quality");
   state.collections.push({
     id:`COL-${crypto.randomUUID().slice(0, 8).toUpperCase()}`, storeId, date:data.get("date"), cups, wetKg, quality,
@@ -840,6 +899,9 @@ async function startCloud() {
   if (!remote) return;
   state = hydrateState({ ...remote.state, currentView: "overview" });
   cloudRevision = remote.revision;
+  cloudBaseState = structuredClone(remote.state);
+  cloudBaseState.currentView = "overview";
+  lastQueuedState = structuredClone(cloudBaseState);
   cloudSaveBlocked = false;
   app.hidden = false;
   auth.hidden = true;

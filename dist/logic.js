@@ -81,10 +81,9 @@ export function calculateEconomics(params) {
   const contribution = revenue - variableCost;
   const profit = revenue - operatingCost;
   const marginPct = revenue > 0 ? (profit / revenue) * 100 : 0;
-  const unitContribution = Number(params.pricePerPack || 0) - Number(params.variableCostPerPack || 0);
-  const breakEvenPacks = unitContribution > 0
-    ? Math.ceil((Number(params.monthlyLogisticsCost || 0) + Number(params.monthlyFixedCost || 0)) / unitContribution)
-    : 0;
+  const breakEvenPacks = Number(params.pricePerPack || 0) > 0
+    ? Math.ceil(operatingCost / Number(params.pricePerPack))
+    : null;
 
   return {
     wetKg,
@@ -169,6 +168,7 @@ export function normalizeImportedRows(rows, defaults = {}) {
     const wetKg = Number.isFinite(suppliedWeight) && suppliedWeight > 0
       ? round(suppliedWeight, 2)
       : estimateWetGroundsKg(cups, grams);
+    if (wetKg <= 0) throw new Error(`Строка ${index + 2}: вес после округления должен быть больше нуля.`);
     return {
       id: `IMP-${Date.now()}-${index + 1}`,
       storeName: String(store || `Импортированная точка ${index + 1}`).trim(),
@@ -214,6 +214,70 @@ export function buildPickupRoute(collections, stores) {
     distanceKm,
     estimatedMinutes: Math.round(22 + ordered.length * 14 + distanceKm * 1.8),
   };
+}
+
+export function sameValue(a, b) {
+  if (Object.is(a, b)) return true;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, index) => sameValue(value, b[index]));
+  }
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((key) => Object.hasOwn(b, key) && sameValue(a[key], b[key]));
+}
+
+function mergeRecordList(name, base, local, remote) {
+  const original = new Map(base.map((item) => [item.id, item]));
+  const edited = new Map(local.map((item) => [item.id, item]));
+  const latest = new Map(remote.map((item) => [item.id, item]));
+  const merged = remote.map((item) => structuredClone(item));
+  for (const [id, before] of original) {
+    const after = edited.get(id);
+    if (sameValue(before, after)) continue;
+    const remoteValue = latest.get(id);
+    if (!sameValue(remoteValue, before) && !sameValue(remoteValue, after)) throw new Error(`Конфликт в ${name}: ${id}. Обновите данные.`);
+    const index = merged.findIndex((item) => item.id === id);
+    if (after === undefined) {
+      if (index >= 0) merged.splice(index, 1);
+    } else if (index >= 0) merged[index] = structuredClone(after);
+    else merged.push(structuredClone(after));
+  }
+  for (const [id, after] of edited) {
+    if (original.has(id)) continue;
+    const remoteValue = latest.get(id);
+    if (remoteValue !== undefined && !sameValue(remoteValue, after)) throw new Error(`Конфликт в ${name}: ${id}. Обновите данные.`);
+    if (remoteValue === undefined) merged.push(structuredClone(after));
+  }
+  return merged;
+}
+
+export function mergeWorkspaceState(base, local, remote) {
+  if (sameValue(base, remote)) return structuredClone(local);
+  const merged = structuredClone(remote);
+  const recordLists = new Set(["stores", "collections", "routes", "batches", "productionRuns"]);
+  for (const key of new Set([...Object.keys(base), ...Object.keys(local)])) {
+    if (sameValue(base[key], local[key])) continue;
+    if (recordLists.has(key) && Array.isArray(base[key]) && Array.isArray(local[key]) && Array.isArray(remote[key])) {
+      merged[key] = mergeRecordList(key, base[key], local[key], remote[key]);
+      continue;
+    }
+    if (key === "economicsParams") {
+      merged[key] = { ...remote[key] };
+      for (const param of new Set([...Object.keys(base[key] || {}), ...Object.keys(local[key] || {})])) {
+        if (sameValue(base[key]?.[param], local[key]?.[param])) continue;
+        if (!sameValue(base[key]?.[param], remote[key]?.[param]) && !sameValue(local[key]?.[param], remote[key]?.[param])) throw new Error(`Конфликт параметра ${param}. Обновите данные.`);
+        merged[key][param] = local[key][param];
+      }
+      continue;
+    }
+    if (key === "lastImport") {
+      merged[key] = structuredClone(local[key]);
+      continue;
+    }
+    if (!sameValue(base[key], remote[key]) && !sameValue(local[key], remote[key])) throw new Error(`Конфликт поля ${key}. Обновите данные.`);
+    merged[key] = structuredClone(local[key]);
+  }
+  return merged;
 }
 
 export function formatMoney(value) {

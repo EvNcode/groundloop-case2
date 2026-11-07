@@ -8,6 +8,7 @@ import {
   estimateWetGroundsKg,
   normalizeImportedRows,
   parseCsv,
+  mergeWorkspaceState,
 } from "../dist/logic.js";
 
 test("estimates wet grounds from drink count", () => {
@@ -50,6 +51,20 @@ test("economics preserves material balance and profit formula", () => {
   assert.equal(result.producedPacks, 600);
   assert.equal(result.revenue, 600000);
   assert.equal(result.profit, 330000);
+  assert.equal(result.breakEvenPacks, 270);
+});
+
+test("break-even includes the cost of unsold production", () => {
+  const result = calculateEconomics({
+    activeStores: 2, cupsPerStoreDay: 100, daysPerMonth: 30,
+    wetGramsPerCup: 30, dryYieldPct: 50, rejectPct: 0,
+    groundsPerPackG: 150, sellThroughPct: 50,
+    pricePerPack: 1000, variableCostPerPack: 400,
+    monthlyLogisticsCost: 10000, monthlyFixedCost: 20000,
+  });
+  assert.equal(result.producedPacks, 600);
+  assert.equal(result.soldPacks, 300);
+  assert.equal(result.breakEvenPacks, 270);
 });
 
 test("CSV parser handles quoted commas", () => {
@@ -107,4 +122,23 @@ test("route groups multiple ready records from one store into one stop", () => {
 
 test("empty route shows zero distance and time", () => {
   assert.deepEqual(buildPickupRoute([], []), { stops: [], totalKg: 0, distanceKm: 0, estimatedMinutes: 0 });
+});
+
+test("concurrent edits to separate collections are merged", () => {
+  const base = { collections: [{ id: "A", status: "review" }, { id: "B", status: "ready" }], economicsParams: { pricePerPack: 1000 } };
+  const local = { ...base, collections: [{ id: "A", status: "ready" }, base.collections[1]] };
+  const remote = { ...base, collections: [base.collections[0], { id: "B", status: "collected" }] };
+  assert.deepEqual(mergeWorkspaceState(base, local, remote).collections, [{ id: "A", status: "ready" }, { id: "B", status: "collected" }]);
+});
+
+test("concurrent edits to the same collection stay blocked", () => {
+  const base = { collections: [{ id: "A", status: "review" }] };
+  assert.throws(() => mergeWorkspaceState(base, { collections: [{ id: "A", status: "ready" }] }, { collections: [{ id: "A", status: "rejected" }] }), /Конфликт/);
+});
+
+test("concurrent additions and independent economics changes are preserved", () => {
+  const base = { collections: [], economicsParams: { pricePerPack: 1000, dryYieldPct: 50 } };
+  const local = { collections: [{ id: "A" }], economicsParams: { pricePerPack: 1200, dryYieldPct: 50 } };
+  const remote = { collections: [{ id: "B" }], economicsParams: { pricePerPack: 1000, dryYieldPct: 55 } };
+  assert.deepEqual(mergeWorkspaceState(base, local, remote), { collections: [{ id: "B" }, { id: "A" }], economicsParams: { pricePerPack: 1200, dryYieldPct: 55 } });
 });
