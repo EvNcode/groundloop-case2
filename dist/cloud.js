@@ -59,6 +59,12 @@ export async function signUp(email, password) {
   return request("/auth/v1/signup", { method: "POST", body: JSON.stringify({ email, password }) });
 }
 
+export async function requestPasswordRecovery(email) {
+  return request("/auth/v1/recover", {
+    method: "POST", body: JSON.stringify({ email }),
+  });
+}
+
 export async function signOut() {
   if (session?.access_token) {
     await request("/auth/v1/logout", { method: "POST" }, session.access_token).catch(() => {});

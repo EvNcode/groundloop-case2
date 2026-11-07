@@ -12,7 +12,7 @@ import {
   parseCsv,
   round,
 } from "./logic.js";
-import { cloudEnabled, restoreSession, signIn, signUp, signOut, acceptInviteSession, updatePassword, getMembership, readWorkspace, createWorkspace, updateWorkspace } from "./cloud.js";
+import { cloudEnabled, restoreSession, signIn, signUp, requestPasswordRecovery, signOut, acceptInviteSession, updatePassword, getMembership, readWorkspace, createWorkspace, updateWorkspace } from "./cloud.js";
 
 const TODAY = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Qyzylorda", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const viewMeta = {
@@ -722,6 +722,7 @@ async function startCloud() {
   if (await acceptInviteSession()) {
     document.querySelector("#authForm").hidden = true;
     document.querySelector("#signUp").hidden = true;
+    document.querySelector("#recoverPassword").hidden = true;
     document.querySelector("#inviteForm").hidden = false;
     document.querySelector("#authMessage").textContent = "Установите пароль для входа";
     return;
@@ -757,6 +758,7 @@ document.querySelector("#inviteForm").addEventListener("submit", async (event) =
     form.hidden = true;
     document.querySelector("#authForm").hidden = false;
     document.querySelector("#signUp").hidden = false;
+    document.querySelector("#recoverPassword").hidden = false;
     message.textContent = "Пароль установлен";
     await startCloud();
   } catch (error) { message.textContent = error.message; }
@@ -784,6 +786,16 @@ document.querySelector("#signUp").addEventListener("click", async () => {
     if (!form.reportValidity()) return;
     await signUp(form.elements.namedItem("email").value, form.elements.namedItem("password").value);
     message.textContent = "Проверьте почту для подтверждения, затем войдите";
+  } catch (error) { message.textContent = error.message; }
+});
+
+document.querySelector("#recoverPassword").addEventListener("click", async () => {
+  const input = document.querySelector("#authForm input[name=email]");
+  const message = document.querySelector("#authMessage");
+  if (!input.reportValidity()) return;
+  try {
+    await requestPasswordRecovery(input.value);
+    message.textContent = "Ссылка для установки нового пароля отправлена на почту";
   } catch (error) { message.textContent = error.message; }
 });
 
