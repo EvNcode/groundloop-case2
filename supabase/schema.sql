@@ -13,7 +13,7 @@ create table if not exists public.groundloop_workspace (
   updated_by uuid references auth.users(id)
 );
 
-create index if not exists groundloop_members_role_idx on public.groundloop_members(role);
+create index if not exists groundloop_workspace_updated_by_idx on public.groundloop_workspace(updated_by);
 alter table public.groundloop_members enable row level security;
 alter table public.groundloop_workspace enable row level security;
 

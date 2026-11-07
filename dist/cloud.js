@@ -16,7 +16,7 @@ async function request(path, options = {}, token = null) {
     ...options,
     headers: {
       apikey: SUPABASE_PUBLISHABLE_KEY,
-      Authorization: `Bearer ${token || SUPABASE_PUBLISHABLE_KEY}`,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       "Content-Type": "application/json",
       ...options.headers,
     },

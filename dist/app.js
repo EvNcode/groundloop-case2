@@ -14,7 +14,7 @@ import {
 } from "./logic.js";
 import { cloudEnabled, restoreSession, signIn, signUp, signOut, getMembership, readWorkspace, createWorkspace, updateWorkspace } from "./cloud.js";
 
-const TODAY = "2026-11-06";
+const TODAY = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Qyzylorda", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const viewMeta = {
   overview: "Смена и задачи",
   collections: "Сбор на точках",
@@ -213,7 +213,7 @@ function syntheticNotice() {
   return `
     <div class="data-note">
       <span class="data-note-dot"></span>
-      <strong>Демо · синтетические данные</strong>
+      <strong>${state.dataMode === "synthetic" ? "Демо · синтетические данные" : "Импортированные и синтетические данные"}</strong>
     </div>`;
 }
 
@@ -500,7 +500,7 @@ function renderData() {
       <article class="panel panel-pad">
         <p class="eyebrow">Управление данными</p><h2 style="margin:7px 0 16px">Переносимые данные</h2>
         <div class="data-actions"><button class="button button-dark" data-action="download-template">Скачать шаблон CSV</button><button class="button button-ghost" data-action="export-json">Экспорт JSON</button><button class="button button-ghost" data-action="reset-demo">Сбросить демо</button></div>
-        <div class="assumption-list" style="margin-top:22px"><div class="assumption"><i></i><span>Текущий источник</span><strong>${state.dataMode === "synthetic" ? "Синтетика" : "Импорт"}</strong></div><div class="assumption"><i></i><span>Хранилище MVP</span><strong>Браузер</strong></div><div class="assumption"><i></i><span>Импортированных записей</span><strong>${state.collections.filter((x)=>x.source==="import").length}</strong></div><div class="assumption"><i></i><span>Готовность к API</span><strong>через адаптер</strong></div></div>
+        <div class="assumption-list" style="margin-top:22px"><div class="assumption"><i></i><span>Текущий источник</span><strong>${state.dataMode === "synthetic" ? "Синтетика" : "Импорт + демо"}</strong></div><div class="assumption"><i></i><span>Хранилище</span><strong>${cloudEnabled ? "Supabase" : "Браузер"}</strong></div><div class="assumption"><i></i><span>Импортированных записей</span><strong>${state.collections.filter((x)=>x.source==="import").length}</strong></div></div>
       </article>
     </section>
     <section class="panel">
@@ -512,6 +512,8 @@ function renderData() {
 
 function render() {
   viewTitle.textContent = viewMeta[state.currentView] || viewMeta.overview;
+  document.querySelector(".mode-line strong").textContent = cloudEnabled ? "Рабочая база" : "Демо-режим";
+  document.querySelector(".mode-line small").textContent = state.dataMode === "synthetic" ? "Синтетические данные" : "Импорт + демо";
   globalScenario.value = state.scenario;
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === state.currentView));
   const renderers = { overview: renderOverview, collections: renderCollections, logistics: renderLogistics, production: renderProduction, economics: renderEconomics, traceability: renderTraceability, data: renderData };
@@ -722,7 +724,7 @@ async function startCloud() {
   cloudRole = await getMembership();
   if (!cloudRole) {
     document.querySelector("#authMessage").textContent = "Аккаунт создан. Администратор должен добавить вас в команду";
-    document.querySelector("#signOut").hidden = false;
+    document.querySelector("#authSignOut").hidden = false;
     return;
   }
   let remote = await readWorkspace();
@@ -766,6 +768,14 @@ document.querySelector("#signOut").addEventListener("click", async () => {
   cloudUser = null;
   cloudRole = null;
   await startCloud();
+});
+
+document.querySelector("#authSignOut").addEventListener("click", async () => {
+  await signOut();
+  cloudUser = null;
+  cloudRole = null;
+  document.querySelector("#authSignOut").hidden = true;
+  document.querySelector("#authMessage").textContent = "";
 });
 
 startCloud().catch((error) => { document.querySelector("#authMessage").textContent = error.message; });
