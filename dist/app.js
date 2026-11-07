@@ -12,6 +12,7 @@ import {
   parseCsv,
   round,
 } from "./logic.js";
+import { cloudEnabled, restoreSession, signIn, signUp, signOut, getMembership, readWorkspace, createWorkspace, updateWorkspace } from "./cloud.js";
 
 const TODAY = "2026-11-06";
 const viewMeta = {
@@ -138,6 +139,10 @@ function loadState() {
 
 let state = loadState();
 let toastTimer;
+let cloudUser = null;
+let cloudRole = null;
+let cloudRevision = 0;
+let saveQueue = Promise.resolve();
 
 const contentArea = document.querySelector("#contentArea");
 const viewTitle = document.querySelector("#viewTitle");
@@ -149,7 +154,20 @@ const collectionDate = document.querySelector("#collectionDate");
 const toast = document.querySelector("#toast");
 
 function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if (!cloudEnabled) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    return;
+  }
+  if (!cloudUser || cloudRole === "viewer") return;
+  const snapshot = structuredClone(state);
+  document.querySelector("#syncStatus").textContent = "Сохранение…";
+  saveQueue = saveQueue.then(async () => {
+    cloudRevision = await updateWorkspace(snapshot, cloudRevision, cloudUser.id);
+    document.querySelector("#syncStatus").textContent = "Сохранено";
+  }).catch((error) => {
+    document.querySelector("#syncStatus").textContent = "Ошибка сохранения";
+    showToast(error.message);
+  });
 }
 
 function showToast(message) {
@@ -498,12 +516,14 @@ function render() {
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === state.currentView));
   const renderers = { overview: renderOverview, collections: renderCollections, logistics: renderLogistics, production: renderProduction, economics: renderEconomics, traceability: renderTraceability, data: renderData };
   contentArea.innerHTML = (renderers[state.currentView] || renderOverview)();
+  if (cloudRole === "viewer") contentArea.querySelectorAll("button[data-action], input, textarea").forEach((control) => { control.disabled = true; });
+  document.querySelectorAll("[data-action='open-collection']").forEach((control) => { control.disabled = cloudRole === "viewer"; });
   bindViewSpecificEvents();
 }
 
 function setView(view) {
   state.currentView = view;
-  saveState();
+  if (!cloudEnabled) saveState();
   render();
   window.scrollTo({ top: 0, behavior: "smooth" });
   document.querySelector("#sidebar").classList.remove("open");
@@ -686,4 +706,66 @@ collectionForm.addEventListener("submit", (event) => {
   saveState(); collectionDialog.close(); collectionForm.reset(); render(); showToast("Сбор добавлен в журнал.");
 });
 
-render();
+async function startCloud() {
+  const auth = document.querySelector("#authScreen");
+  const app = document.querySelector(".app-shell");
+  if (!cloudEnabled) {
+    auth.hidden = true;
+    app.hidden = false;
+    render();
+    return;
+  }
+  app.hidden = true;
+  auth.hidden = false;
+  cloudUser = await restoreSession();
+  if (!cloudUser) return;
+  cloudRole = await getMembership();
+  if (!cloudRole) {
+    document.querySelector("#authMessage").textContent = "Аккаунт создан. Администратор должен добавить вас в команду";
+    document.querySelector("#signOut").hidden = false;
+    return;
+  }
+  let remote = await readWorkspace();
+  if (!remote && cloudRole !== "viewer") remote = await createWorkspace(seedState(), cloudUser.id);
+  if (!remote) return;
+  state = remote.state;
+  cloudRevision = remote.revision;
+  app.hidden = false;
+  auth.hidden = true;
+  document.querySelector("#syncStatus").textContent = "Сохранено в Supabase";
+  document.querySelector("#signOut").hidden = false;
+  render();
+}
+
+document.querySelector("#authForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const message = document.querySelector("#authMessage");
+  const form = event.currentTarget;
+  const button = form.querySelector("button[type=submit]");
+  button.disabled = true;
+  message.textContent = "Проверка…";
+  try {
+    await signIn(form.elements.namedItem("email").value, form.elements.namedItem("password").value);
+    await startCloud();
+  } catch (error) { message.textContent = error.message; }
+  finally { button.disabled = false; }
+});
+
+document.querySelector("#signUp").addEventListener("click", async () => {
+  const form = document.querySelector("#authForm");
+  const message = document.querySelector("#authMessage");
+  try {
+    if (!form.reportValidity()) return;
+    await signUp(form.elements.namedItem("email").value, form.elements.namedItem("password").value);
+    message.textContent = "Проверьте почту для подтверждения, затем войдите";
+  } catch (error) { message.textContent = error.message; }
+});
+
+document.querySelector("#signOut").addEventListener("click", async () => {
+  await signOut();
+  cloudUser = null;
+  cloudRole = null;
+  await startCloud();
+});
+
+startCloud().catch((error) => { document.querySelector("#authMessage").textContent = error.message; });

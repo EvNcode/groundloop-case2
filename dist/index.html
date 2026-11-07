@@ -19,6 +19,19 @@
     <script type="module" src="./app.js"></script>
   </head>
   <body>
+    <section class="auth-screen" id="authScreen" hidden>
+      <div class="auth-card">
+        <div class="brand-block"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><p class="brand-name">GroundLoop</p><p class="brand-subtitle">Global Coffee × Coyote</p></div></div>
+        <h1>Вход для сотрудников</h1>
+        <form id="authForm">
+          <label class="field">Почта<input name="email" type="email" autocomplete="username" required /></label>
+          <label class="field">Пароль<input name="password" type="password" autocomplete="current-password" required minlength="6" /></label>
+          <button class="button button-primary" type="submit">Войти</button>
+        </form>
+        <button class="text-button" id="signUp" type="button">Создать аккаунт</button>
+        <p id="authMessage" role="status"></p>
+      </div>
+    </section>
     <div class="app-shell">
       <aside class="sidebar" id="sidebar">
         <div class="brand-block">
@@ -53,6 +66,8 @@
             <h1 id="viewTitle">Обзор пилота</h1>
           </div>
           <div class="topbar-actions">
+            <span class="sync-status" id="syncStatus">Локальное демо</span>
+            <button class="text-button" id="signOut" type="button" hidden>Выйти</button>
             <label class="scenario-select">
               <select id="globalScenario" aria-label="Сценарий расчёта">
                 <option value="conservative">Осторожный</option>
