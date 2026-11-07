@@ -155,27 +155,36 @@ export function normalizeImportedRows(rows, defaults = {}) {
     const date = findValue(row, ["дата", "date", "day"]);
     const cupsRaw = findValue(row, ["напитки", "чашки", "количество", "cups", "drinks", "qty", "sales"]);
     const weightRaw = findValue(row, ["жмыхкг", "вескг", "вес", "grounds", "groundskg", "weight", "weightkg", "kg"]);
-    const cups = Number(String(cupsRaw ?? "").replace(",", ".")) || 0;
-    const suppliedWeight = Number(String(weightRaw ?? "").replace(",", "."));
+    const cupsText = String(cupsRaw ?? "").trim();
+    const weightText = String(weightRaw ?? "").trim();
+    const cups = cupsText ? Number(cupsText.replace(",", ".")) : 0;
+    const suppliedWeight = weightText ? Number(weightText.replace(",", ".")) : 0;
+    const dateText = date instanceof Date && !Number.isNaN(date.getTime()) ? date.toISOString().slice(0, 10) : String(date ?? "").trim();
+    const dateValue = /^\d{4}-\d{2}-\d{2}$/.test(dateText) ? new Date(`${dateText}T12:00:00Z`) : null;
+    if (!String(store ?? "").trim()) throw new Error(`Строка ${index + 2}: укажите точку.`);
+    if (!dateValue || Number.isNaN(dateValue.getTime()) || dateValue.toISOString().slice(0, 10) !== dateText) throw new Error(`Строка ${index + 2}: дата должна быть в формате ГГГГ-ММ-ДД.`);
+    if (!Number.isInteger(cups) || cups < 0) throw new Error(`Строка ${index + 2}: число напитков должно быть целым и неотрицательным.`);
+    if (!Number.isFinite(suppliedWeight) || suppliedWeight < 0) throw new Error(`Строка ${index + 2}: вес должен быть неотрицательным числом.`);
+    if (!cups && !suppliedWeight) throw new Error(`Строка ${index + 2}: укажите напитки или вес.`);
     const wetKg = Number.isFinite(suppliedWeight) && suppliedWeight > 0
       ? round(suppliedWeight, 2)
       : estimateWetGroundsKg(cups, grams);
     return {
       id: `IMP-${Date.now()}-${index + 1}`,
       storeName: String(store || `Импортированная точка ${index + 1}`).trim(),
-      date: String(date || new Date().toISOString().slice(0, 10)).trim(),
+      date: dateText,
       cups,
       wetKg,
       weightSource: suppliedWeight > 0 ? "measured" : "estimated",
-      status: "ready",
+      status: "review",
       quality: "pending",
       source: "import",
     };
-  }).filter((row) => row.cups > 0 || row.wetKg > 0);
+  });
 }
 
 export function buildPickupRoute(collections, stores) {
-  const ready = collections.filter((item) => item.status === "ready");
+  const ready = collections.filter((item) => item.status === "ready" && item.quality === "good");
   const storeById = new Map(stores.map((store) => [store.id, store]));
   const grouped = new Map();
   ready.forEach((item) => {
@@ -196,6 +205,7 @@ export function buildPickupRoute(collections, stores) {
     const sb = storeById.get(b.storeId) || {};
     return String(sa.district || a.storeName).localeCompare(String(sb.district || b.storeName), "ru");
   });
+  if (!ordered.length) return { stops: [], totalKg: 0, distanceKm: 0, estimatedMinutes: 0 };
   const totalKg = round(ordered.reduce((sum, item) => sum + Number(item.wetKg || 0), 0), 2);
   const distanceKm = round(5.8 + ordered.length * 2.35, 1);
   return {

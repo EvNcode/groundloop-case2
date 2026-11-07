@@ -12,7 +12,7 @@ import {
   parseCsv,
   round,
 } from "./logic.js";
-import { cloudEnabled, restoreSession, signIn, signUp, requestPasswordRecovery, signOut, acceptInviteSession, updatePassword, getMembership, readWorkspace, createWorkspace, updateWorkspace } from "./cloud.js";
+import { cloudEnabled, restoreSession, signIn, signUp, requestPasswordRecovery, signOut, acceptInviteSession, updatePassword, getMembership, requestTeamAccess, listTeam, approveTeamAccess, updateTeamRole, readWorkspace, createWorkspace, updateWorkspace } from "./cloud.js";
 
 const TODAY = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Qyzylorda", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const viewMeta = {
@@ -23,6 +23,7 @@ const viewMeta = {
   economics: "Экономика",
   traceability: "Паспорт партии",
   data: "Данные",
+  team: "Команда",
 };
 
 function seedState() {
@@ -131,10 +132,21 @@ function loadState() {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (!stored) return seedState();
     const parsed = JSON.parse(stored);
-    return { ...seedState(), ...parsed };
+    return hydrateState(parsed);
   } catch {
     return seedState();
   }
+}
+
+function hydrateState(raw) {
+  const baseline = seedState();
+  const next = { ...baseline, ...raw, economicsParams: { ...baseline.economicsParams, ...(raw?.economicsParams || {}) } };
+  for (const key of ["stores", "collections", "routes", "batches", "productionRuns"]) {
+    if (!Array.isArray(next[key])) next[key] = baseline[key];
+  }
+  if (!SCENARIOS[next.scenario]) next.scenario = "base";
+  if (!viewMeta[next.currentView]) next.currentView = "overview";
+  return next;
 }
 
 let state = loadState();
@@ -143,6 +155,8 @@ let cloudUser = null;
 let cloudRole = null;
 let cloudRevision = 0;
 let saveQueue = Promise.resolve();
+let cloudSaveBlocked = false;
+let teamData = { members: [], requests: [] };
 
 const contentArea = document.querySelector("#contentArea");
 const viewTitle = document.querySelector("#viewTitle");
@@ -158,16 +172,24 @@ function saveState() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     return;
   }
-  if (!cloudUser || cloudRole === "viewer") return;
+  if (!cloudUser || cloudRole === "viewer" || cloudSaveBlocked) return;
   const snapshot = structuredClone(state);
+  snapshot.currentView = "overview";
   document.querySelector("#syncStatus").textContent = "Сохранение…";
   saveQueue = saveQueue.then(async () => {
+    if (cloudSaveBlocked) return;
     cloudRevision = await updateWorkspace(snapshot, cloudRevision, cloudUser.id);
     document.querySelector("#syncStatus").textContent = "Сохранено";
   }).catch((error) => {
-    document.querySelector("#syncStatus").textContent = "Ошибка сохранения";
-    showToast(error.message);
+    cloudSaveBlocked = true;
+    document.querySelector("#syncStatus").textContent = "Не сохранено · обновите данные";
+    render();
+    showToast(`${error.message}. Обновите данные перед продолжением.`);
   });
+}
+
+function h(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 }
 
 function showToast(message) {
@@ -184,6 +206,7 @@ function storeFor(id) {
 function statusLabel(status) {
   return ({
     ready: "Готов к вывозу",
+    review: "На проверке",
     scheduled: "В маршруте",
     collected: "Собрано",
     rejected: "Отклонено",
@@ -206,14 +229,16 @@ function sourceLabel(source) {
 
 function formatDate(value) {
   if (!value) return "—";
-  return new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short" }).format(new Date(`${value}T12:00:00`));
+  const date = new Date(`${value}T12:00:00`);
+  return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short" }).format(date);
 }
 
 function syntheticNotice() {
+  const label = state.dataMode !== "synthetic" ? "Импорт + синтетические данные" : state.collections.some((item) => item.source === "manual") ? "Ручные записи + синтетические данные" : "Демо · синтетические данные";
   return `
     <div class="data-note">
       <span class="data-note-dot"></span>
-      <strong>${state.dataMode === "synthetic" ? "Демо · синтетические данные" : "Импортированные и синтетические данные"}</strong>
+      <strong>${label}</strong>
     </div>`;
 }
 
@@ -230,7 +255,7 @@ function renderKpis(metrics) {
 function dashboardMetrics() {
   const relevant = state.collections.filter((item) => item.status !== "rejected");
   const wetKg = relevant.reduce((sum, item) => sum + Number(item.wetKg || 0), 0);
-  const ready = relevant.filter((item) => item.status === "ready");
+  const ready = relevant.filter((item) => item.status === "ready" && item.quality === "good");
   const measured = relevant.filter((item) => item.weightSource === "measured").length;
   const active = state.stores.filter((store) => store.active);
   const avgCups = active.length ? active.reduce((sum, store) => sum + store.avgCups, 0) / active.length : 0;
@@ -255,7 +280,7 @@ function dashboardMetrics() {
 function renderOverview() {
   const metrics = dashboardMetrics();
   const recent = [...state.collections].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6);
-  const workflowWet = round(state.collections.filter((x) => x.status !== "rejected").reduce((s, x) => s + x.wetKg, 0), 1);
+  const workflowWet = round(state.collections.filter((x) => x.status !== "rejected" && x.quality === "good").reduce((s, x) => s + x.wetKg, 0), 1);
   const workflowDry = calculateDryOutput(workflowWet, SCENARIOS[state.scenario].dryYieldPct, SCENARIOS[state.scenario].rejectPct);
   const packs = calculatePackOutput(workflowDry.acceptedKg, 160, 100);
   const pendingQuality = state.collections.filter((x) => x.quality === "pending").length;
@@ -268,7 +293,7 @@ function renderOverview() {
       ${renderKpis(metrics)}
       <section class="operations-grid">
         <article class="panel flow-panel">
-          <div class="panel-header"><div><h2>Поток материала</h2></div><span class="panel-meta">23:10</span></div>
+          <div class="panel-header"><div><h2>Поток материала</h2></div><span class="panel-meta">Оценка</span></div>
           <div class="material-flow">
             <div class="material-stage"><span class="stage-index">01</span><div><small>На точках</small><strong>${formatNumber(workflowWet, 1)} кг</strong><p>Мокрый жмых</p></div></div>
             <span class="route-connector"></span>
@@ -292,7 +317,7 @@ function renderOverview() {
         <article class="panel">
           <div class="panel-header"><div><h2>Последние записи</h2></div><button class="button button-ghost button-small" data-view-link="collections">Все записи</button></div>
           <div class="table-wrap"><table><thead><tr><th>Точка</th><th>Дата</th><th>Напитки</th><th>Вес</th><th>Статус</th></tr></thead><tbody>
-            ${recent.map((item) => `<tr><td><span class="table-title">${storeFor(item.storeId)?.name || item.storeName}</span><span class="table-sub">${item.id}</span></td><td>${formatDate(item.date)}</td><td>${formatNumber(item.cups)}</td><td>${formatNumber(item.wetKg, 1)} кг <span class="badge badge-${item.weightSource}">${sourceLabel(item.weightSource)}</span></td><td><span class="badge badge-${item.status}">${statusLabel(item.status)}</span></td></tr>`).join("")}
+            ${recent.map((item) => `<tr><td><span class="table-title">${h(storeFor(item.storeId)?.name || item.storeName)}</span><span class="table-sub">${h(item.id)}</span></td><td>${formatDate(item.date)}</td><td>${formatNumber(item.cups)}</td><td>${formatNumber(item.wetKg, 1)} кг <span class="badge badge-${h(item.weightSource)}">${sourceLabel(item.weightSource)}</span></td><td><span class="badge badge-${h(item.status)}">${item.quality === "pending" ? "На проверке" : statusLabel(item.status)}</span></td></tr>`).join("")}
           </tbody></table></div>
         </article>
         <article class="panel stores-panel">
@@ -302,7 +327,7 @@ function renderOverview() {
               const expected = estimateWetGroundsKg(store.avgCups, SCENARIOS[state.scenario].wetGramsPerCup);
               const actual = state.collections.filter((x)=>x.storeId===store.id && x.date===TODAY && x.status!=="rejected").reduce((sum,x)=>sum+x.wetKg,0);
               const pct = Math.min(100, Math.round((actual / Math.max(expected, .1))*100));
-              return `<div class="store-row"><div><strong>${store.name.replace("Global Coffee — ","")}</strong><small>${actual ? `${formatNumber(actual,1)} из ${formatNumber(expected,1)} кг` : `нет записи · ожидается ${formatNumber(expected,1)} кг`}</small></div><div class="store-progress"><span style="width:${pct}%"></span></div><span class="store-percent">${pct}%</span></div>`;
+              return `<div class="store-row"><div><strong>${h(store.name.replace("Global Coffee — ",""))}</strong><small>${actual ? `${formatNumber(actual,1)} из ${formatNumber(expected,1)} кг` : `нет записи · ожидается ${formatNumber(expected,1)} кг`}</small></div><div class="store-progress"><span style="width:${pct}%"></span></div><span class="store-percent">${pct}%</span></div>`;
             }).join("")}
           </div>
         </article>
@@ -317,14 +342,14 @@ function renderCollections() {
       ${syntheticNotice()}
       <section class="kpi-grid">
         <article class="kpi-card"><div class="kpi-label">Записей</div><div class="kpi-value">${state.collections.length}</div><div class="kpi-footer"><span>за демо-период</span></div></article>
-        <article class="kpi-card"><div class="kpi-label">Измерено</div><div class="kpi-value">${state.collections.filter((x) => x.weightSource === "measured").length}</div><div class="kpi-footer"><span>реальный ввод оператора</span></div></article>
-        <article class="kpi-card"><div class="kpi-label">Оценено</div><div class="kpi-value">${state.collections.filter((x) => x.weightSource === "estimated").length}</div><div class="kpi-footer"><span>по напиткам Coyote</span></div></article>
+        <article class="kpi-card"><div class="kpi-label">Измерено</div><div class="kpi-value">${state.collections.filter((x) => x.weightSource === "measured").length}</div><div class="kpi-footer"><span>вес указан в записи</span></div></article>
+        <article class="kpi-card"><div class="kpi-label">Оценено</div><div class="kpi-value">${state.collections.filter((x) => x.weightSource === "estimated").length}</div><div class="kpi-footer"><span>расчёт по числу напитков</span></div></article>
         <article class="kpi-card"><div class="kpi-label">Отклонено</div><div class="kpi-value">${state.collections.filter((x) => x.status === "rejected").length}</div><div class="kpi-footer"><span>не попадёт в партию</span></div></article>
       </section>
       <section class="panel">
         <div class="panel-header"><div><h2>Журнал сбора</h2></div><button class="button button-primary" data-action="open-collection">Добавить</button></div>
-        <div class="table-wrap"><table><thead><tr><th>ID</th><th>Точка</th><th>Дата</th><th>Продажи</th><th>Жмых</th><th>Качество</th><th>Статус</th></tr></thead><tbody>
-          ${[...state.collections].sort((a,b) => b.date.localeCompare(a.date)).map((item) => `<tr><td>${item.id}</td><td><span class="table-title">${storeFor(item.storeId)?.name || item.storeName}</span><span class="table-sub">${storeFor(item.storeId)?.district || "Импорт"}</span></td><td>${formatDate(item.date)}</td><td>${formatNumber(item.cups)} напитков</td><td><strong>${formatNumber(item.wetKg,1)} кг</strong><span class="table-sub">${sourceLabel(item.weightSource)}</span></td><td><span class="badge badge-${item.quality}">${qualityLabel(item.quality)}</span></td><td><span class="badge badge-${item.status}">${statusLabel(item.status)}</span></td></tr>`).join("")}
+        <div class="table-wrap"><table><thead><tr><th>ID</th><th>Точка</th><th>Дата</th><th>Продажи</th><th>Жмых</th><th>Качество</th><th>Статус / действие</th></tr></thead><tbody>
+          ${[...state.collections].sort((a,b) => b.date.localeCompare(a.date)).map((item) => `<tr><td>${h(item.id)}</td><td><span class="table-title">${h(storeFor(item.storeId)?.name || item.storeName)}</span><span class="table-sub">${h(storeFor(item.storeId)?.district || "Импорт")}</span></td><td>${formatDate(item.date)}</td><td>${formatNumber(item.cups)} напитков</td><td><strong>${formatNumber(item.wetKg,1)} кг</strong><span class="table-sub">${sourceLabel(item.weightSource)}</span></td><td><span class="badge badge-${h(item.quality)}">${qualityLabel(item.quality)}</span></td><td>${item.quality === "pending" ? `<div class="review-actions"><button class="button button-dark button-small" data-action="approve-collection" data-id="${h(item.id)}">Принять</button><button class="button button-ghost button-small" data-action="reject-collection" data-id="${h(item.id)}">Отклонить</button></div>` : `<span class="badge badge-${h(item.status)}">${statusLabel(item.status)}</span>`}</td></tr>`).join("")}
         </tbody></table></div>
       </section>
       <section class="panel">
@@ -333,7 +358,7 @@ function renderCollections() {
           ${activeStores.map((store) => {
             const entries = state.collections.filter((x) => x.storeId === store.id && x.status !== "rejected");
             const kg = entries.reduce((s,x) => s + x.wetKg,0);
-            return `<article class="batch-card"><div class="batch-head"><div><h3>${store.name.replace("Global Coffee — ","")}</h3><span class="table-sub">${store.district}</span></div><span class="badge badge-good">в пилоте</span></div><div class="batch-meta"><div><span>чашек/день</span><strong>${store.avgCups}</strong></div><div><span>учтено</span><strong>${round(kg,1)} кг</strong></div><div><span>записей</span><strong>${entries.length}</strong></div></div></article>`;
+            return `<article class="batch-card"><div class="batch-head"><div><h3>${h(store.name.replace("Global Coffee — ",""))}</h3><span class="table-sub">${h(store.district)}</span></div><span class="badge badge-good">в пилоте</span></div><div class="batch-meta"><div><span>чашек/день</span><strong>${formatNumber(store.avgCups)}</strong></div><div><span>учтено</span><strong>${round(kg,1)} кг</strong></div><div><span>записей</span><strong>${entries.length}</strong></div></div></article>`;
           }).join("")}
         </div>
       </section>
@@ -350,7 +375,7 @@ function renderLogistics() {
         <article class="route-card">
           <div class="route-top"><div><p class="eyebrow">Сборка маршрута</p><h3>Следующий маршрут</h3></div><span class="badge badge-${routePreview.stops.length ? "scheduled" : "complete"}">${routePreview.stops.length ? `${routePreview.stops.length} остановки` : "нет заявок"}</span></div>
           <div class="route-metrics"><div class="route-metric"><span>Сырьё</span><strong>${routePreview.totalKg} кг</strong></div><div class="route-metric"><span>Дистанция</span><strong>${routePreview.distanceKm} км</strong></div><div class="route-metric"><span>Время</span><strong>${routePreview.estimatedMinutes} мин</strong></div></div>
-          <div class="route-path">${routePreview.stops.length ? routePreview.stops.map((item, index) => `<span class="route-stop">${index+1}. ${(storeFor(item.storeId)?.name || item.storeName).replace("Global Coffee — ","")}</span>`).join("<span class='flow-arrow'>→</span>") : "<span style='color:rgba(255,255,255,.55)'>Добавьте записи со статусом «Готов к вывозу».</span>"}</div>
+          <div class="route-path">${routePreview.stops.length ? routePreview.stops.map((item, index) => `<span class="route-stop">${index+1}. ${h((storeFor(item.storeId)?.name || item.storeName).replace("Global Coffee — ",""))}</span>`).join("<span class='flow-arrow'>→</span>") : "<span style='color:rgba(255,255,255,.55)'>Подтвердите качество записей, готовых к вывозу.</span>"}</div>
           <div style="margin-top:20px"><button class="button button-primary" data-action="create-route" ${!routePreview.stops.length ? "disabled" : ""}>Создать маршрут</button></div>
         </article>
         <article class="panel panel-pad">
@@ -370,7 +395,7 @@ function renderLogistics() {
           ${routes.map((route) => {
             const items = state.collections.filter((x) => route.collectionIds.includes(x.id));
             const kg = items.reduce((s,x) => s + x.wetKg,0);
-            return `<tr><td><span class="table-title">${route.id}</span></td><td>${formatDate(route.date)}</td><td>${items.length}</td><td>${round(kg,1)} кг</td><td>${route.distanceKm} км</td><td><span class="badge badge-${route.status}">${statusLabel(route.status)}</span></td><td>${route.status === "planned" ? `<button class="button button-dark button-small" data-action="complete-route" data-id="${route.id}">Завершить</button>` : ""}</td></tr>`;
+            return `<tr><td><span class="table-title">${h(route.id)}</span></td><td>${formatDate(route.date)}</td><td>${items.length}</td><td>${round(kg,1)} кг</td><td>${h(route.distanceKm)} км</td><td><span class="badge badge-${h(route.status)}">${statusLabel(route.status)}</span></td><td>${route.status === "planned" ? `<button class="button button-dark button-small" data-action="complete-route" data-id="${h(route.id)}">Завершить</button>` : ""}</td></tr>`;
           }).join("") || `<tr><td colspan="7"><div class="empty-state"><strong>Маршрутов пока нет</strong>Создайте первый маршрут из готовых контейнеров.</div></td></tr>`}
         </tbody></table></div>
       </section>
@@ -385,16 +410,16 @@ function renderProduction() {
       <section class="kpi-grid">
         <article class="kpi-card"><div class="kpi-label">Собрано без партии</div><div class="kpi-value">${round(unbatched.reduce((s,x)=>s+x.wetKg,0),1)} кг</div><div class="kpi-footer"><span>${unbatched.length} записей</span></div></article>
         <article class="kpi-card"><div class="kpi-label">Партий</div><div class="kpi-value">${state.batches.length}</div><div class="kpi-footer"><span>полная прослеживаемость</span></div></article>
-        <article class="kpi-card"><div class="kpi-label">Готовой продукции</div><div class="kpi-value">${state.productionRuns.reduce((s,x)=>s+x.producedPacks,0)}</div><div class="kpi-footer"><span>упаковок в демо</span></div></article>
+        <article class="kpi-card"><div class="kpi-label">Готовой продукции</div><div class="kpi-value">${formatNumber(state.productionRuns.reduce((s,x)=>s+Number(x.producedPacks || 0),0))}</div><div class="kpi-footer"><span>упаковок в демо</span></div></article>
         <article class="kpi-card"><div class="kpi-label">Базовый сухой выход</div><div class="kpi-value">${SCENARIOS[state.scenario].dryYieldPct}%</div><div class="kpi-footer"><span>редактируется в экономике</span></div></article>
       </section>
       <section class="panel">
         <div class="panel-header"><div><h2>Партии</h2></div><button class="button button-primary" data-action="create-batch" ${!unbatched.length ? "disabled" : ""}>Новая партия</button></div>
         <div class="panel-pad triple-grid">
           ${state.batches.map((batch) => `<article class="batch-card ${batch.id === state.selectedBatchId ? "selected" : ""}">
-            <div class="batch-head"><div><h3>${batch.id}</h3><span class="table-sub">${formatDate(batch.createdAt)} · ${batch.sourceStores.length} точки</span></div><span class="badge badge-${batch.status}">${statusLabel(batch.status)}</span></div>
-            <div class="batch-meta"><div><span>мокрый вес</span><strong>${batch.wetKg} кг</strong></div><div><span>чистый сухой</span><strong>${batch.acceptedKg} кг</strong></div><div><span>упаковки</span><strong>${batch.producedPacks || "—"}</strong></div></div>
-            <div style="display:flex;gap:8px;margin-top:14px"><button class="button button-ghost button-small" data-action="select-batch" data-id="${batch.id}">Открыть</button>${batch.status !== "complete" ? `<button class="button button-dark button-small" data-action="advance-batch" data-id="${batch.id}">Следующий этап</button>` : ""}</div>
+            <div class="batch-head"><div><h3>${h(batch.id)}</h3><span class="table-sub">${formatDate(batch.createdAt)} · ${batch.sourceStores.length} точки</span></div><span class="badge badge-${h(batch.status)}">${statusLabel(batch.status)}</span></div>
+            <div class="batch-meta"><div><span>мокрый вес</span><strong>${h(batch.wetKg)} кг</strong></div><div><span>чистый сухой</span><strong>${h(batch.acceptedKg)} кг</strong></div><div><span>упаковки</span><strong>${h(batch.producedPacks || "—")}</strong></div></div>
+            <div style="display:flex;gap:8px;margin-top:14px"><button class="button button-ghost button-small" data-action="select-batch" data-id="${h(batch.id)}">Открыть</button>${batch.status !== "complete" ? `<button class="button button-dark button-small" data-action="advance-batch" data-id="${h(batch.id)}">Следующий этап</button>` : ""}</div>
           </article>`).join("")}
         </div>
       </section>
@@ -409,23 +434,23 @@ function renderSelectedBatch() {
   const sources = batch.sourceStores.map((id) => storeFor(id)?.name.replace("Global Coffee — ","") || id).join(", ");
   return `<section class="split-grid">
     <article class="panel panel-pad">
-      <p class="eyebrow">Выбранная партия</p><h2 style="margin:7px 0 18px">${batch.id}</h2>
+      <p class="eyebrow">Выбранная партия</p><h2 style="margin:7px 0 18px">${h(batch.id)}</h2>
       <div class="form-grid">
-        <label class="field">Сухой выход, %<input type="number" value="${batch.dryYieldPct}" disabled /></label>
-        <label class="field">Брак, %<input type="number" value="${batch.rejectPct}" disabled /></label>
-        <label class="field">Жмых на упаковку, г<input type="number" value="${batch.groundsPerPackG || 160}" disabled /></label>
+        <label class="field">Сухой выход, %<input type="number" value="${h(batch.dryYieldPct)}" disabled /></label>
+        <label class="field">Брак, %<input type="number" value="${h(batch.rejectPct)}" disabled /></label>
+        <label class="field">Жмых на упаковку, г<input type="number" value="${h(batch.groundsPerPackG || 160)}" disabled /></label>
         <label class="field">Потенциальный выпуск<input type="text" value="${potential.producedPacks} упаковок" disabled /></label>
-        <label class="field field-wide">Источники<input type="text" value="${sources}" disabled /></label>
+        <label class="field field-wide">Источники<input type="text" value="${h(sources)}" disabled /></label>
       </div>
-      <div style="margin-top:16px;display:flex;gap:9px"><button class="button button-primary" data-action="create-run" data-id="${batch.id}" ${batch.status !== "complete" || batch.producedPacks ? "disabled" : ""}>Зафиксировать выпуск</button><button class="button button-ghost" data-view-link="traceability">Паспорт партии</button></div>
+      <div style="margin-top:16px;display:flex;gap:9px"><button class="button button-primary" data-action="create-run" data-id="${h(batch.id)}" ${batch.status !== "complete" || batch.producedPacks ? "disabled" : ""}>Зафиксировать выпуск</button><button class="button button-ghost" data-view-link="traceability">Паспорт партии</button></div>
     </article>
     <article class="panel">
       <div class="panel-header"><div><h2>Этапы</h2></div></div>
       <div class="stepper">
-        <div class="step-row"><span class="step-index">1</span><div><strong>Приёмка</strong><p>Вес и происхождение партии</p></div><span class="step-stat">${batch.wetKg} кг</span></div>
-        <div class="step-row"><span class="step-index">2</span><div><strong>Сушка</strong><p>Контроль влажности партнёром</p></div><span class="step-stat">${batch.driedKg} кг</span></div>
-        <div class="step-row"><span class="step-index">3</span><div><strong>Контроль</strong><p>Удаление загрязнённого сырья</p></div><span class="step-stat">${batch.acceptedKg} кг</span></div>
-        <div class="step-row"><span class="step-index">4</span><div><strong>Формование и упаковка</strong><p>${batch.recipe}</p></div><span class="step-stat">${batch.producedPacks || potential.producedPacks} уп.</span></div>
+        <div class="step-row"><span class="step-index">1</span><div><strong>Приёмка</strong><p>Вес и происхождение партии</p></div><span class="step-stat">${h(batch.wetKg)} кг</span></div>
+        <div class="step-row"><span class="step-index">2</span><div><strong>Сушка</strong><p>Контроль влажности партнёром</p></div><span class="step-stat">${h(batch.driedKg)} кг</span></div>
+        <div class="step-row"><span class="step-index">3</span><div><strong>Контроль</strong><p>Удаление загрязнённого сырья</p></div><span class="step-stat">${h(batch.acceptedKg)} кг</span></div>
+        <div class="step-row"><span class="step-index">4</span><div><strong>Формование и упаковка</strong><p>${h(batch.recipe)}</p></div><span class="step-stat">${h(batch.producedPacks || potential.producedPacks)} уп.</span></div>
       </div>
     </article>
   </section>`;
@@ -450,19 +475,19 @@ function renderEconomics() {
     ${syntheticNotice()}
     <div class="scenario-tabs">${Object.entries(SCENARIOS).map(([key, item]) => `<button class="scenario-tab ${state.scenario === key ? "active" : ""}" data-action="set-scenario" data-id="${key}">${item.label}</button>`).join("")}</div>
     <section class="economics-hero">
-      <article class="profit-card ${e.profit < 0 ? "negative" : ""}"><span>Операционная прибыль / месяц</span><strong>${formatMoney(e.profit)}</strong><small>${e.marginPct}% от выручки · при реализации ${p.sellThroughPct}% выпуска</small></article>
+      <article class="profit-card ${e.profit < 0 ? "negative" : ""}"><span>Операционная прибыль / месяц</span><strong>${formatMoney(e.profit)}</strong><small>${e.marginPct}% от выручки · при реализации ${h(p.sellThroughPct)}% выпуска</small></article>
       <article class="breakdown"><div class="breakdown-row"><span>Выручка</span><strong>${formatMoney(e.revenue)}</strong></div><div class="breakdown-row"><span>Переменные расходы</span><strong>− ${formatMoney(e.variableCost)}</strong></div><div class="breakdown-row"><span>Логистика</span><strong>− ${formatMoney(p.monthlyLogisticsCost)}</strong></div><div class="breakdown-row"><span>Постоянные расходы</span><strong>− ${formatMoney(p.monthlyFixedCost)}</strong></div><div class="breakdown-row total"><span>Результат</span><strong>${formatMoney(e.profit)}</strong></div></article>
     </section>
     <section class="split-grid">
-      <article class="panel panel-pad"><p class="eyebrow">Параметры расчёта</p><h2 style="margin:7px 0 18px">Проверьте любую гипотезу</h2>${ranges.map(([key,label,min,max,step,suffix]) => `<div class="range-field"><div class="range-head"><span>${label}</span><strong data-value-for="${key}">${formatNumber(p[key],0)}${suffix}</strong></div><input type="range" min="${min}" max="${max}" step="${step}" value="${p[key]}" data-economics-key="${key}" data-suffix="${suffix}" /></div>`).join("")}</article>
+      <article class="panel panel-pad"><p class="eyebrow">Параметры расчёта</p><h2 style="margin:7px 0 18px">Проверьте любую гипотезу</h2>${ranges.map(([key,label,min,max,step,suffix]) => `<div class="range-field"><div class="range-head"><span>${label}</span><strong data-value-for="${key}">${formatNumber(p[key],0)}${suffix}</strong></div><input type="range" min="${min}" max="${max}" step="${step}" value="${h(p[key])}" data-economics-key="${key}" data-suffix="${suffix}" /></div>`).join("")}</article>
       <article class="panel">
         <div class="panel-header"><div><h2>Баланс за месяц</h2></div></div>
         <div class="stepper">
-          <div class="step-row"><span class="step-index">1</span><div><strong>Проданные напитки</strong><p>${p.activeStores} точек × ${p.cupsPerStoreDay} × 30 дней</p></div><span class="step-stat">${formatNumber(p.activeStores*p.cupsPerStoreDay*30)}</span></div>
-          <div class="step-row"><span class="step-index">2</span><div><strong>Мокрый жмых</strong><p>${p.wetGramsPerCup} г на напиток</p></div><span class="step-stat">${formatNumber(e.wetKg,0)} кг</span></div>
-          <div class="step-row"><span class="step-index">3</span><div><strong>Принято после сушки</strong><p>Сухой выход ${p.dryYieldPct}%, брак ${p.rejectPct}%</p></div><span class="step-stat">${formatNumber(e.acceptedKg,0)} кг</span></div>
-          <div class="step-row"><span class="step-index">4</span><div><strong>Произведено</strong><p>${p.groundsPerPackG} г жмыха на упаковку</p></div><span class="step-stat">${formatNumber(e.producedPacks)} уп.</span></div>
-          <div class="step-row"><span class="step-index">5</span><div><strong>Продано</strong><p>Коэффициент реализации ${p.sellThroughPct}%</p></div><span class="step-stat">${formatNumber(e.soldPacks)} уп.</span></div>
+          <div class="step-row"><span class="step-index">1</span><div><strong>Проданные напитки</strong><p>${h(p.activeStores)} точек × ${h(p.cupsPerStoreDay)} × 30 дней</p></div><span class="step-stat">${formatNumber(p.activeStores*p.cupsPerStoreDay*30)}</span></div>
+          <div class="step-row"><span class="step-index">2</span><div><strong>Мокрый жмых</strong><p>${h(p.wetGramsPerCup)} г на напиток</p></div><span class="step-stat">${formatNumber(e.wetKg,0)} кг</span></div>
+          <div class="step-row"><span class="step-index">3</span><div><strong>Принято после сушки</strong><p>Сухой выход ${h(p.dryYieldPct)}%, брак ${h(p.rejectPct)}%</p></div><span class="step-stat">${formatNumber(e.acceptedKg,0)} кг</span></div>
+          <div class="step-row"><span class="step-index">4</span><div><strong>Произведено</strong><p>${h(p.groundsPerPackG)} г жмыха на упаковку</p></div><span class="step-stat">${formatNumber(e.producedPacks)} уп.</span></div>
+          <div class="step-row"><span class="step-index">5</span><div><strong>Продано</strong><p>Коэффициент реализации ${h(p.sellThroughPct)}%</p></div><span class="step-stat">${formatNumber(e.soldPacks)} уп.</span></div>
         </div>
         <div class="panel-pad" style="padding-top:0"><div class="notice"><span class="notice-dot"></span><div><strong>Точка безубыточности</strong>${formatNumber(e.breakEvenPacks)} проданных упаковок в месяц при текущей цене и себестоимости.</div></div></div>
       </article>
@@ -475,14 +500,14 @@ function renderTraceability() {
   if (!batch) return `<div class="empty-state"><strong>Нет партий</strong>Сначала создайте партию в разделе «Производство».</div>`;
   const stores = batch.sourceStores.map((id) => storeFor(id)).filter(Boolean);
   return `<div class="view-stack">
-    <div class="panel panel-pad" style="display:flex;align-items:end;justify-content:space-between;gap:15px;flex-wrap:wrap"><label class="field" style="min-width:280px">Выберите партию<select id="passportBatch">${state.batches.map((b)=>`<option value="${b.id}" ${b.id===batch.id?"selected":""}>${b.id} · ${statusLabel(b.status)}</option>`).join("")}</select></label><span class="badge badge-${batch.status}">${statusLabel(batch.status)}</span></div>
+    <div class="panel panel-pad" style="display:flex;align-items:end;justify-content:space-between;gap:15px;flex-wrap:wrap"><label class="field" style="min-width:280px">Выберите партию<select id="passportBatch">${state.batches.map((b)=>`<option value="${h(b.id)}" ${b.id===batch.id?"selected":""}>${h(b.id)} · ${statusLabel(b.status)}</option>`).join("")}</select></label><span class="badge badge-${h(batch.status)}">${statusLabel(batch.status)}</span></div>
     <section class="passport">
-      <div class="passport-cover" data-batch="${batch.id}"><p class="eyebrow">Паспорт партии</p><h2>${batch.id}</h2></div>
+      <div class="passport-cover" data-batch="${h(batch.id)}"><p class="eyebrow">Паспорт партии</p><h2>${h(batch.id)}</h2></div>
       <div class="passport-grid">
-        <div class="passport-section"><h3>Происхождение</h3>${stores.map((s)=>`<div class="passport-fact"><span>${s.name.replace("Global Coffee — ","")}</span><strong>${s.district}</strong></div>`).join("") || `<div class="passport-fact"><span>Источник</span><strong>не указан</strong></div>`}</div>
-        <div class="passport-section"><h3>Материальный баланс</h3><div class="passport-fact"><span>Мокрый жмых</span><strong>${batch.wetKg} кг</strong></div><div class="passport-fact"><span>После сушки</span><strong>${batch.driedKg} кг</strong></div><div class="passport-fact"><span>Принято</span><strong>${batch.acceptedKg} кг</strong></div><div class="passport-fact"><span>Выпуск</span><strong>${batch.producedPacks ? `${batch.producedPacks} уп.` : "ожидается"}</strong></div></div>
+        <div class="passport-section"><h3>Происхождение</h3>${stores.map((s)=>`<div class="passport-fact"><span>${h(s.name.replace("Global Coffee — ",""))}</span><strong>${h(s.district)}</strong></div>`).join("") || `<div class="passport-fact"><span>Источник</span><strong>не указан</strong></div>`}</div>
+        <div class="passport-section"><h3>Материальный баланс</h3><div class="passport-fact"><span>Мокрый жмых</span><strong>${h(batch.wetKg)} кг</strong></div><div class="passport-fact"><span>После сушки</span><strong>${h(batch.driedKg)} кг</strong></div><div class="passport-fact"><span>Принято</span><strong>${h(batch.acceptedKg)} кг</strong></div><div class="passport-fact"><span>Выпуск</span><strong>${batch.producedPacks ? `${h(batch.producedPacks)} уп.` : "ожидается"}</strong></div></div>
         <div class="passport-section"><h3>Контроль партии</h3><div class="passport-fact"><span>Дата создания</span><strong>${formatDate(batch.createdAt)}</strong></div><div class="passport-fact"><span>Рецептура</span><strong>R-01</strong></div><div class="passport-fact"><span>Статус</span><strong>${statusLabel(batch.status)}</strong></div></div>
-        <div class="passport-section"><h3>QR-макет</h3><div style="display:flex;align-items:center;gap:18px"><div class="qr-placeholder">${Array.from({length:25},()=>"<i></i>").join("")}</div><p style="color:var(--muted);font-size:10px;line-height:1.55">В финальной упаковке код ведёт на эту страницу партии.</p></div></div>
+        <div class="passport-section"><h3>Маркировка</h3><div style="display:flex;align-items:center;gap:18px"><div class="qr-placeholder" aria-hidden="true">${Array.from({length:25},()=>"<i></i>").join("")}</div><p style="color:var(--muted);font-size:10px;line-height:1.55">Макет этикетки. Публичная ссылка и настоящий QR-код пока не настроены.</p></div></div>
       </div>
     </section>
   </div>`;
@@ -495,11 +520,11 @@ function renderData() {
       <article class="panel panel-pad">
         <p class="eyebrow">Импорт Coyote</p><h2 style="margin:7px 0 16px">Загрузите CSV или Excel</h2>
         <div class="upload-zone" id="uploadZone"><div class="upload-icon">⇧</div><h3>Перетащите отчёт сюда</h3><p>Колонки: Точка, Дата, Напитки, Жмых кг. Вес можно не указывать — он будет рассчитан.</p><input type="file" id="fileInput" accept=".csv,.xlsx,.xls" hidden /><button class="button button-primary" data-action="choose-file">Выбрать файл</button></div>
-        ${state.lastImport ? `<div class="notice" style="margin-top:15px"><span class="notice-dot"></span><div><strong>Последний импорт: ${state.lastImport.fileName}</strong>${state.lastImport.rows} строк · ${state.lastImport.at}</div></div>` : ""}
+        ${state.lastImport ? `<div class="notice" style="margin-top:15px"><span class="notice-dot"></span><div><strong>Последний импорт: ${h(state.lastImport.fileName)}</strong>${formatNumber(state.lastImport.rows)} строк · ${h(state.lastImport.at)}</div></div>` : ""}
       </article>
       <article class="panel panel-pad">
         <p class="eyebrow">Управление данными</p><h2 style="margin:7px 0 16px">Переносимые данные</h2>
-        <div class="data-actions"><button class="button button-dark" data-action="download-template">Скачать шаблон CSV</button><button class="button button-ghost" data-action="export-json">Экспорт JSON</button><button class="button button-ghost" data-action="reset-demo">Сбросить демо</button></div>
+        <div class="data-actions"><button class="button button-dark" data-action="download-template">Скачать шаблон CSV</button><button class="button button-ghost" data-action="export-json">Экспорт JSON</button>${!cloudEnabled || cloudRole === "admin" ? `<button class="button button-ghost" data-action="reset-demo">Сбросить демо</button>` : ""}</div>
         <div class="assumption-list" style="margin-top:22px"><div class="assumption"><i></i><span>Текущий источник</span><strong>${state.dataMode === "synthetic" ? "Синтетика" : "Импорт + демо"}</strong></div><div class="assumption"><i></i><span>Хранилище</span><strong>${cloudEnabled ? "Supabase" : "Браузер"}</strong></div><div class="assumption"><i></i><span>Импортированных записей</span><strong>${state.collections.filter((x)=>x.source==="import").length}</strong></div></div>
       </article>
     </section>
@@ -510,20 +535,40 @@ function renderData() {
   </div>`;
 }
 
+function renderTeam() {
+  const date = (value) => new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Qyzylorda" }).format(new Date(value));
+  return `<div class="view-stack">
+    <section class="panel">
+      <div class="panel-header"><div><h2>Запросы на доступ</h2><p class="table-sub">Сотрудник регистрируется на сайте и подтверждает почту. После одобрения он сможет войти в рабочую базу.</p></div><span class="panel-meta">${teamData.requests.length}</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Почта</th><th>Дата</th><th>Роль</th><th></th></tr></thead><tbody>
+        ${teamData.requests.map((request) => `<tr><td><span class="table-title">${h(request.email)}</span></td><td>${date(request.created_at)}</td><td><select class="team-role" data-approve-role="${h(request.user_id)}"><option value="operator">Оператор</option><option value="viewer">Наблюдатель</option></select></td><td><button class="button button-dark button-small" data-action="approve-member" data-id="${h(request.user_id)}">Добавить</button></td></tr>`).join("") || `<tr><td colspan="4"><div class="empty-state"><strong>Новых запросов нет</strong></div></td></tr>`}
+      </tbody></table></div>
+    </section>
+    <section class="panel">
+      <div class="panel-header"><div><h2>Сотрудники</h2><p class="table-sub">Оператор изменяет данные. Наблюдатель только просматривает.</p></div><span class="panel-meta">${teamData.members.length}</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Почта</th><th>Добавлен</th><th>Роль</th></tr></thead><tbody>
+        ${teamData.members.map((member) => `<tr><td><span class="table-title">${h(member.email || member.user_id)}</span>${member.user_id === cloudUser.id ? `<span class="table-sub">Вы</span>` : ""}</td><td>${date(member.created_at)}</td><td><select class="team-role" data-member-role="${h(member.user_id)}" ${member.user_id === cloudUser.id ? "disabled title=\"Свою роль нельзя изменить здесь\"" : ""}><option value="admin" ${member.role === "admin" ? "selected" : ""}>Администратор</option><option value="operator" ${member.role === "operator" ? "selected" : ""}>Оператор</option><option value="viewer" ${member.role === "viewer" ? "selected" : ""}>Наблюдатель</option></select></td></tr>`).join("")}
+      </tbody></table></div>
+    </section>
+  </div>`;
+}
+
 function render() {
   viewTitle.textContent = viewMeta[state.currentView] || viewMeta.overview;
   document.querySelector(".mode-line strong").textContent = cloudEnabled ? "Рабочая база" : "Демо-режим";
-  document.querySelector(".mode-line small").textContent = state.dataMode === "synthetic" ? "Синтетические данные" : "Импорт + демо";
+  document.querySelector(".mode-line small").textContent = state.dataMode !== "synthetic" ? "Импорт + демо" : state.collections.some((item) => item.source === "manual") ? "Ручной ввод + демо" : "Синтетические данные";
   globalScenario.value = state.scenario;
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === state.currentView));
-  const renderers = { overview: renderOverview, collections: renderCollections, logistics: renderLogistics, production: renderProduction, economics: renderEconomics, traceability: renderTraceability, data: renderData };
+  const renderers = { overview: renderOverview, collections: renderCollections, logistics: renderLogistics, production: renderProduction, economics: renderEconomics, traceability: renderTraceability, data: renderData, team: renderTeam };
   contentArea.innerHTML = (renderers[state.currentView] || renderOverview)();
-  if (cloudRole === "viewer") contentArea.querySelectorAll("button[data-action], input, textarea").forEach((control) => { control.disabled = true; });
-  document.querySelectorAll("[data-action='open-collection']").forEach((control) => { control.disabled = cloudRole === "viewer"; });
+  if (cloudRole === "viewer" || cloudSaveBlocked) contentArea.querySelectorAll("button[data-action], input, textarea").forEach((control) => { control.disabled = true; });
+  document.querySelectorAll("[data-action='open-collection']").forEach((control) => { control.disabled = cloudRole === "viewer" || cloudSaveBlocked; });
+  globalScenario.disabled = cloudRole === "viewer" || cloudSaveBlocked;
   bindViewSpecificEvents();
 }
 
 function setView(view) {
+  if (view === "team" && cloudRole !== "admin") return;
   state.currentView = view;
   if (!cloudEnabled) saveState();
   render();
@@ -532,7 +577,7 @@ function setView(view) {
 }
 
 function openCollectionDialog() {
-  collectionStore.innerHTML = state.stores.filter((x) => x.active).map((store) => `<option value="${store.id}">${store.name}</option>`).join("");
+  collectionStore.innerHTML = state.stores.filter((x) => x.active).map((store) => `<option value="${h(store.id)}">${h(store.name)}</option>`).join("");
   collectionDate.value = TODAY;
   collectionDialog.showModal();
 }
@@ -622,18 +667,28 @@ function download(name, content, type="text/plain;charset=utf-8") {
 
 async function importFile(file) {
   try {
+    if (cloudRole === "viewer" || cloudSaveBlocked) return;
+    if (!/\.(csv|xlsx|xls)$/i.test(file.name)) throw new Error("Поддерживаются только CSV и Excel.");
+    if (file.size > 5 * 1024 * 1024) throw new Error("Файл больше 5 МБ. Разделите отчёт на части.");
+    const bytes = await file.arrayBuffer();
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const fingerprint = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 16);
     let rows;
     if (file.name.toLowerCase().endsWith(".csv")) {
-      rows = parseCsv(await file.text());
+      rows = parseCsv(new TextDecoder("utf-8").decode(bytes));
     } else {
       if (!window.XLSX) throw new Error("Модуль Excel ещё не загрузился. Попробуйте CSV или повторите через несколько секунд.");
-      const workbook = window.XLSX.read(await file.arrayBuffer(), { type: "array" });
-      rows = window.XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: "" });
+      const workbook = window.XLSX.read(bytes, { type: "array", cellDates: true });
+      rows = window.XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: "", raw: true });
     }
+    if (rows.length > 5000) throw new Error("В файле больше 5000 строк. Разделите отчёт на части.");
     const normalized = normalizeImportedRows(rows, { wetGramsPerCup: SCENARIOS[state.scenario].wetGramsPerCup });
     if (!normalized.length) throw new Error("Не найдены строки с количеством напитков или весом.");
-    normalized.forEach((item) => {
-      let store = state.stores.find((s)=>s.name.toLowerCase()===item.storeName.toLowerCase());
+    const existingIds = new Set(state.collections.map((item) => item.id));
+    const fresh = normalized.map((item, index) => ({ ...item, id: `IMP-${fingerprint}-${index + 1}` })).filter((item) => !existingIds.has(item.id));
+    if (!fresh.length) return showToast("Этот файл уже импортирован. Новых записей нет.");
+    fresh.forEach((item) => {
+      let store = state.stores.find((s)=>s.name.trim().toLowerCase()===item.storeName.toLowerCase());
       if (!store) {
         store = { id:`IMP-S-${state.stores.length+1}`, name:item.storeName, district:"Импорт", avgCups:item.cups, active:true };
         state.stores.push(store);
@@ -641,8 +696,8 @@ async function importFile(file) {
       state.collections.push({ ...item, storeId:store.id });
     });
     state.dataMode = "mixed";
-    state.lastImport = { fileName:file.name, rows:normalized.length, at:new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short"}).format(new Date()) };
-    saveState(); render(); showToast(`Импортировано ${normalized.length} строк.`);
+    state.lastImport = { fileName:file.name, rows:fresh.length, at:new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short",timeZone:"Asia/Qyzylorda"}).format(new Date()) };
+    saveState(); render(); showToast(`Импортировано ${fresh.length} строк. Проверьте качество перед вывозом.`);
   } catch (error) {
     showToast(error.message || "Не удалось импортировать файл.");
   }
@@ -661,8 +716,39 @@ function bindViewSpecificEvents() {
   if (passport) passport.addEventListener("change",()=>{state.selectedBatchId=passport.value;saveState();render();});
   document.querySelectorAll("[data-economics-key]").forEach((input)=>input.addEventListener("input",()=>{
     state.economicsParams[input.dataset.economicsKey] = Number(input.value);
-    saveState(); render();
+    const output = document.querySelector(`[data-value-for="${input.dataset.economicsKey}"]`);
+    if (output) output.textContent = `${formatNumber(input.value, 0)}${input.dataset.suffix}`;
   }));
+  document.querySelectorAll("[data-economics-key]").forEach((input)=>input.addEventListener("change",()=>{ saveState(); render(); }));
+}
+
+function reviewCollection(id, approved) {
+  const item = state.collections.find((entry) => entry.id === id);
+  if (!item || item.quality !== "pending" || !["ready", "review"].includes(item.status)) return;
+  item.quality = approved ? "good" : "rejected";
+  item.status = approved ? "ready" : "rejected";
+  saveState(); render(); showToast(approved ? "Качество подтверждено. Запись доступна для вывоза." : "Запись отклонена и исключена из вывоза.");
+}
+
+async function refreshTeam() {
+  if (cloudRole !== "admin") return;
+  teamData = await listTeam();
+  if (state.currentView === "team") render();
+}
+
+async function approveMember(id, button) {
+  const accessRequest = teamData.requests.find((entry) => entry.user_id === id);
+  if (!accessRequest) return;
+  const role = document.querySelector(`[data-approve-role="${id}"]`)?.value || "operator";
+  button.disabled = true;
+  try {
+    await approveTeamAccess(accessRequest, role);
+    await refreshTeam();
+    showToast(`${accessRequest.email}: доступ открыт.`);
+  } catch (error) {
+    button.disabled = false;
+    showToast(error.message);
+  }
 }
 
 document.querySelectorAll(".nav-item").forEach((item)=>item.addEventListener("click",()=>setView(item.dataset.view)));
@@ -677,6 +763,9 @@ contentArea.addEventListener("click", (event) => {
   const { action, id } = button.dataset;
   if (action === "open-collection") openCollectionDialog();
   if (action === "create-route") createRoute();
+  if (action === "approve-collection") reviewCollection(id, true);
+  if (action === "reject-collection") reviewCollection(id, false);
+  if (action === "approve-member") void approveMember(id, button);
   if (action === "complete-route") completeRoute(id);
   if (action === "create-batch") createBatch();
   if (action === "advance-batch") advanceBatch(id);
@@ -687,22 +776,25 @@ contentArea.addEventListener("click", (event) => {
   if (action === "download-template") download("groundloop-template.csv", "Точка,Дата,Напитки,Жмых кг\nGlobal Coffee — Абая,2026-11-06,238,7.7\nGlobal Coffee — Mega,2026-11-06,326,\n", "text/csv;charset=utf-8");
   if (action === "export-json") download("groundloop-export.json", JSON.stringify(state,null,2), "application/json");
   if (action === "reset-demo") {
+    if (cloudEnabled && cloudRole !== "admin") return;
     if (window.confirm("Сбросить все изменения и вернуть исходные синтетические данные?")) { state=seedState(); saveState(); render(); showToast("Демо-данные восстановлены."); }
   }
 });
 
 collectionForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (cloudRole === "viewer" || cloudSaveBlocked) return;
   const data = new FormData(collectionForm);
   const storeId = data.get("storeId");
   const cups = Number(data.get("cups"));
   const enteredWeight = Number(data.get("wetKg"));
+  if ((!cups && !enteredWeight) || cups < 0 || enteredWeight < 0 || !state.stores.some((store) => store.active && store.id === storeId)) return showToast("Укажите точку и количество напитков или вес больше нуля.");
   const estimated = !enteredWeight;
   const wetKg = enteredWeight || estimateWetGroundsKg(cups, SCENARIOS[state.scenario].wetGramsPerCup);
   const quality = data.get("quality");
   state.collections.push({
-    id:`COL-${Date.now().toString().slice(-6)}`, storeId, date:data.get("date"), cups, wetKg, quality,
-    status: quality === "rejected" ? "rejected" : "ready", weightSource: estimated ? "estimated" : "measured",
+    id:`COL-${crypto.randomUUID().slice(0, 8).toUpperCase()}`, storeId, date:data.get("date"), cups, wetKg, quality,
+    status: quality === "rejected" ? "rejected" : quality === "pending" ? "review" : "ready", weightSource: estimated ? "estimated" : "measured",
     source:"manual", note:data.get("note") || "",
   });
   saveState(); collectionDialog.close(); collectionForm.reset(); render(); showToast("Сбор добавлен в журнал.");
@@ -729,23 +821,50 @@ async function startCloud() {
   }
   cloudUser = await restoreSession();
   if (!cloudUser) return;
-  cloudRole = await getMembership();
+  cloudRole = await getMembership(cloudUser.id);
   if (!cloudRole) {
-    document.querySelector("#authMessage").textContent = "Аккаунт создан. Администратор должен добавить вас в команду";
+    try {
+      await requestTeamAccess(cloudUser);
+      document.querySelector("#authMessage").textContent = "Заявка на доступ отправлена. После одобрения администратором войдите снова.";
+    } catch (error) {
+      document.querySelector("#authMessage").textContent = `Аккаунт создан, но заявка не отправлена: ${error.message}`;
+    }
     document.querySelector("#authSignOut").hidden = false;
     return;
   }
+  document.querySelector('[data-view="team"]').hidden = cloudRole !== "admin";
+  let teamLoadError = null;
+  if (cloudRole === "admin") await refreshTeam().catch((error) => { teamLoadError = error; });
   let remote = await readWorkspace();
   if (!remote && cloudRole !== "viewer") remote = await createWorkspace(seedState(), cloudUser.id);
   if (!remote) return;
-  state = remote.state;
+  state = hydrateState({ ...remote.state, currentView: "overview" });
   cloudRevision = remote.revision;
+  cloudSaveBlocked = false;
   app.hidden = false;
   auth.hidden = true;
   document.querySelector("#syncStatus").textContent = "Сохранено в Supabase";
   document.querySelector("#signOut").hidden = false;
+  document.querySelector("#reloadWorkspace").hidden = false;
   render();
+  if (teamLoadError) showToast(`Команда не загружена: ${teamLoadError.message}`);
 }
+
+document.querySelector("#reloadWorkspace").addEventListener("click", () => location.reload());
+
+contentArea.addEventListener("change", async (event) => {
+  const select = event.target.closest("[data-member-role]");
+  if (!select || cloudRole !== "admin" || select.dataset.memberRole === cloudUser.id) return;
+  select.disabled = true;
+  try {
+    await updateTeamRole(select.dataset.memberRole, select.value);
+    await refreshTeam();
+    showToast("Роль сотрудника обновлена.");
+  } catch (error) {
+    await refreshTeam().catch(() => {});
+    showToast(error.message);
+  }
+});
 
 document.querySelector("#inviteForm").addEventListener("submit", async (event) => {
   event.preventDefault();

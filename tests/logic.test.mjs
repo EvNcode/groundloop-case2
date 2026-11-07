@@ -67,13 +67,25 @@ test("import marks supplied weight measured and absent weight estimated", () => 
   assert.equal(rows[0].wetKg, 3.4);
   assert.equal(rows[1].weightSource, "estimated");
   assert.equal(rows[1].wetKg, 3.2);
+  assert.equal(rows[0].status, "review");
+});
+
+test("import rejects invalid dates and negative amounts before writing", () => {
+  assert.throws(() => normalizeImportedRows([{ Точка: "Абая", Дата: "2026-02-30", Напитки: "5" }]), /дата/);
+  assert.throws(() => normalizeImportedRows([{ Точка: "Абая", Дата: "2026-11-06", Напитки: "-5" }]), /напитков/);
+});
+
+test("import reads Excel date cells", () => {
+  const rows = normalizeImportedRows([{ Точка: "Абая", Дата: new Date("2026-11-06T00:00:00Z"), Напитки: 100 }]);
+  assert.equal(rows[0].date, "2026-11-06");
 });
 
 test("route uses only ready collections", () => {
   const route = buildPickupRoute([
-    { id: "1", storeId: "A", status: "ready", wetKg: 5 },
-    { id: "2", storeId: "B", status: "collected", wetKg: 7 },
-    { id: "3", storeId: "C", status: "ready", wetKg: 4 },
+    { id: "1", storeId: "A", status: "ready", quality: "good", wetKg: 5 },
+    { id: "2", storeId: "B", status: "collected", quality: "good", wetKg: 7 },
+    { id: "3", storeId: "C", status: "ready", quality: "good", wetKg: 4 },
+    { id: "4", storeId: "D", status: "ready", quality: "pending", wetKg: 3 },
   ], [
     { id: "A", district: "Б" },
     { id: "B", district: "А" },
@@ -85,10 +97,14 @@ test("route uses only ready collections", () => {
 
 test("route groups multiple ready records from one store into one stop", () => {
   const route = buildPickupRoute([
-    { id: "1", storeId: "A", status: "ready", wetKg: 5 },
-    { id: "2", storeId: "A", status: "ready", wetKg: 7 },
+    { id: "1", storeId: "A", status: "ready", quality: "good", wetKg: 5 },
+    { id: "2", storeId: "A", status: "ready", quality: "good", wetKg: 7 },
   ], [{ id: "A", district: "Центр" }]);
   assert.equal(route.stops.length, 1);
   assert.deepEqual(route.stops[0].collectionIds, ["1", "2"]);
   assert.equal(route.totalKg, 12);
+});
+
+test("empty route shows zero distance and time", () => {
+  assert.deepEqual(buildPickupRoute([], []), { stops: [], totalKg: 0, distanceKm: 0, estimatedMinutes: 0 });
 });

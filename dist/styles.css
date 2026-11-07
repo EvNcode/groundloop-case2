@@ -220,7 +220,7 @@ tbody tr:hover { background: #f7faf8; }
 .badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 5px; font-size: 11px; font-weight: 400; white-space: nowrap; }
 .badge::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .badge-ready, .badge-good, .badge-complete { color: var(--positive); background: var(--positive-soft); }
-.badge-scheduled, .badge-pending, .badge-production { color: var(--warning); background: var(--warning-soft); }
+.badge-scheduled, .badge-pending, .badge-review, .badge-production { color: var(--warning); background: var(--warning-soft); }
 .badge-collected, .badge-measured { color: var(--blue); background: var(--blue-soft); }
 .badge-rejected { color: var(--negative); background: var(--negative-soft); }
 .badge-estimated { color: #695d76; background: #eee9f1; }
@@ -363,3 +363,5 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   .scenario-tabs { width: 100%; }
   .scenario-tab { flex: 1; }
 }
+.review-actions { display: flex; gap: 6px; align-items: center; white-space: nowrap; }
+.team-role { min-width: 136px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; }

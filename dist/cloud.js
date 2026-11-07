@@ -36,6 +36,10 @@ export async function restoreSession() {
   try {
     const stored = JSON.parse(localStorage.getItem(sessionKey) || "null");
     if (!stored?.refresh_token) return null;
+    if (stored.access_token && stored.user && Date.now() < (Number(stored.expires_at || 0) - 60) * 1000) {
+      remember(stored);
+      return stored.user;
+    }
     const refreshed = await request("/auth/v1/token?grant_type=refresh_token", {
       method: "POST", body: JSON.stringify({ refresh_token: stored.refresh_token }),
     });
@@ -109,9 +113,47 @@ async function token() {
   return session.access_token;
 }
 
-export async function getMembership() {
-  const rows = await request("/rest/v1/groundloop_members?select=role&limit=1", {}, await token());
+export async function getMembership(userId) {
+  const rows = await request(`/rest/v1/groundloop_members?user_id=eq.${encodeURIComponent(userId)}&select=role&limit=1`, {}, await token());
   return rows[0]?.role || null;
+}
+
+export async function requestTeamAccess(user) {
+  return request("/rest/v1/groundloop_access_requests", {
+    method: "POST",
+    headers: { Prefer: "resolution=ignore-duplicates,return=representation" },
+    body: JSON.stringify({ user_id: user.id, email: user.email }),
+  }, await token());
+}
+
+export async function listTeam() {
+  const accessToken = await token();
+  const [members, requests] = await Promise.all([
+    request("/rest/v1/groundloop_members?select=user_id,email,role,created_at&order=created_at.asc", {}, accessToken),
+    request("/rest/v1/groundloop_access_requests?select=user_id,email,created_at&order=created_at.asc", {}, accessToken),
+  ]);
+  return { members, requests };
+}
+
+export async function approveTeamAccess(accessRequest, role) {
+  if (!["operator", "viewer"].includes(role)) throw new Error("Выберите роль сотрудника");
+  const accessToken = await token();
+  await request("/rest/v1/groundloop_members", {
+    method: "POST", headers: { Prefer: "resolution=ignore-duplicates,return=representation" },
+    body: JSON.stringify({ user_id: accessRequest.user_id, email: accessRequest.email, role }),
+  }, accessToken);
+  await request(`/rest/v1/groundloop_access_requests?user_id=eq.${encodeURIComponent(accessRequest.user_id)}`, {
+    method: "DELETE", headers: { Prefer: "return=minimal" },
+  }, accessToken);
+}
+
+export async function updateTeamRole(userId, role) {
+  if (!["admin", "operator", "viewer"].includes(role)) throw new Error("Неизвестная роль");
+  const rows = await request(`/rest/v1/groundloop_members?user_id=eq.${encodeURIComponent(userId)}&select=user_id`, {
+    method: "PATCH", headers: { Prefer: "return=representation" },
+    body: JSON.stringify({ role }),
+  }, await token());
+  if (!rows.length) throw new Error("Не удалось обновить роль");
 }
 
 export async function readWorkspace() {
