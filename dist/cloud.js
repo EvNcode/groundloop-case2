@@ -66,6 +66,32 @@ export async function signOut() {
   remember(null);
 }
 
+export async function acceptInviteSession() {
+  if (!cloudEnabled) return false;
+  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+  const accessToken = params.get("access_token");
+  const refreshToken = params.get("refresh_token");
+  if (!accessToken || !refreshToken || !["invite", "recovery"].includes(params.get("type"))) return false;
+  const user = await request("/auth/v1/user", {}, accessToken);
+  remember({
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    expires_at: Number(params.get("expires_at")) || Math.floor(Date.now() / 1000) + Number(params.get("expires_in") || 3600),
+    user,
+  });
+  history.replaceState(null, "", location.pathname + location.search);
+  return true;
+}
+
+export async function updatePassword(password) {
+  const user = await request("/auth/v1/user", {
+    method: "PUT", body: JSON.stringify({ password }),
+  }, await token());
+  session.user = user;
+  remember(session);
+  return user;
+}
+
 async function token() {
   if (!session) throw new Error("Войдите в систему");
   if (Date.now() >= (session.expires_at - 60) * 1000) {

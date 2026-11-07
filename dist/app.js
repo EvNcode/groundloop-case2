@@ -12,7 +12,7 @@ import {
   parseCsv,
   round,
 } from "./logic.js";
-import { cloudEnabled, restoreSession, signIn, signUp, signOut, getMembership, readWorkspace, createWorkspace, updateWorkspace } from "./cloud.js";
+import { cloudEnabled, restoreSession, signIn, signUp, signOut, acceptInviteSession, updatePassword, getMembership, readWorkspace, createWorkspace, updateWorkspace } from "./cloud.js";
 
 const TODAY = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Qyzylorda", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const viewMeta = {
@@ -719,6 +719,13 @@ async function startCloud() {
   }
   app.hidden = true;
   auth.hidden = false;
+  if (await acceptInviteSession()) {
+    document.querySelector("#authForm").hidden = true;
+    document.querySelector("#signUp").hidden = true;
+    document.querySelector("#inviteForm").hidden = false;
+    document.querySelector("#authMessage").textContent = "Установите пароль для входа";
+    return;
+  }
   cloudUser = await restoreSession();
   if (!cloudUser) return;
   cloudRole = await getMembership();
@@ -738,6 +745,23 @@ async function startCloud() {
   document.querySelector("#signOut").hidden = false;
   render();
 }
+
+document.querySelector("#inviteForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const message = document.querySelector("#authMessage");
+  const button = form.querySelector("button[type=submit]");
+  button.disabled = true;
+  try {
+    await updatePassword(form.elements.namedItem("password").value);
+    form.hidden = true;
+    document.querySelector("#authForm").hidden = false;
+    document.querySelector("#signUp").hidden = false;
+    message.textContent = "Пароль установлен";
+    await startCloud();
+  } catch (error) { message.textContent = error.message; }
+  finally { button.disabled = false; }
+});
 
 document.querySelector("#authForm").addEventListener("submit", async (event) => {
   event.preventDefault();
