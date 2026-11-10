@@ -53,9 +53,14 @@ function shell(title, subtitle, actions, body) {
 function authScreen(title, description, content) {
   app.innerHTML = `<div class="auth-wrap"><div class="auth-card">${brand()}<h1>${esc(title)}</h1><p>${esc(description)}</p>${content}</div></div>`;
 }
-function loginScreen() {
-  authScreen('Вход в рабочее место', 'Введите рабочую почту. Ссылка для входа придёт в письме.',
-    `<form id="loginForm" class="form"><label class="field">Рабочая почта<input type="email" name="email" autocomplete="email" required placeholder="name@company.kz"></label><button class="btn btn-primary" type="submit">Получить ссылку</button></form>`);
+function loginScreen(mode = 'password') {
+  if (mode === 'link') {
+    authScreen('Вход по ссылке', 'Ссылка придёт на подтверждённую почту сотрудника.',
+      `<form id="linkForm" class="form"><label class="field">Почта<input type="email" name="email" autocomplete="email" required placeholder="name@company.kz"></label><button class="btn btn-primary" type="submit">Получить ссылку</button><button class="btn-link" type="button" data-action="password-login">Войти с паролем</button></form>`);
+    return;
+  }
+  authScreen('Вход в рабочее место', 'Введите почту и пароль сотрудника.',
+    `<form id="loginForm" class="form"><label class="field">Почта<input type="email" name="email" autocomplete="username" required placeholder="name@company.kz"></label><label class="field">Пароль<input type="password" name="password" autocomplete="current-password" required></label><button class="btn btn-primary" type="submit">Войти</button><button class="btn-link" type="button" data-action="link-login">Войти по ссылке</button></form>`);
 }
 function modal(title, html) {
   closeModal();
@@ -321,10 +326,13 @@ function stageDialog(batch, stage) {
 }
 
 function managerTabs() {
-  const items = [['overview','Сводка'],['staff','Команда'],['stores','Точки'],['sales','Продажи']];
+  const items = staff.can_manage_access
+    ? [['overview','Сводка'],['staff','Команда'],['stores','Точки'],['sales','Продажи']]
+    : [['overview','Сводка'],['sales','Продажи']];
   return `<nav class="tabs" aria-label="Разделы управления">${items.map(([id,label])=>`<button class="tab ${activeTab===id?'active':''}" data-action="tab" data-id="${id}">${label}</button>`).join('')}</nav>`;
 }
 function renderManagement() {
+  if (!staff.can_manage_access && ['staff','stores'].includes(activeTab)) activeTab = 'overview';
   const activeContainers=records.containers.filter(x=>!['cancelled','rejected'].includes(x.status));
   const produced=records.batches.reduce((s,x)=>s+x.produced_packs,0);
   const sold=records.sales.reduce((s,x)=>s+x.packs,0);
@@ -367,9 +375,11 @@ async function action(event) {
   const {action: name,id}=el.dataset;
   if (name==='close-modal') return closeModal();
   if (name==='reload') return location.reload();
+  if (name==='link-login') return loginScreen('link');
+  if (name==='password-login') return loginScreen();
   if (name==='logout') { stopGpsOnLogout(); await supabase.auth.signOut(); location.replace(link('index.html')); return; }
   if (!staff) return;
-  if (name==='tab'&&staff.role==='manager') {activeTab=id;render();return;}
+  if (name==='tab'&&staff.role==='manager'&&(staff.can_manage_access||!['staff','stores'].includes(id))) {activeTab=id;render();return;}
   if (name==='print-code') { window.print(); return; }
   const item=records.containers.find(x=>x.id===id);
   const batch=records.batches.find(x=>x.id===id);
@@ -397,8 +407,8 @@ async function action(event) {
     if (name==='dry-weight'&&batch) return stageDialog(batch,'dry-weight');
     if (name==='pack-output'&&batch) return stageDialog(batch,'pack-output');
   }
-  if (staff.role==='manager'&&name==='edit-staff') {const member=records.staff.find(x=>x.email===id);if(member)return staffEditDialog(member);}
-  if (staff.role==='manager'&&name==='edit-store') {const store=records.stores.find(x=>x.id===id);if(store)return storeEditDialog(store);}
+  if (staff.role==='manager'&&staff.can_manage_access&&name==='edit-staff') {const member=records.staff.find(x=>x.email===id);if(member)return staffEditDialog(member);}
+  if (staff.role==='manager'&&staff.can_manage_access&&name==='edit-store') {const store=records.stores.find(x=>x.id===id);if(store)return storeEditDialog(store);}
 }
 function stopGpsOnLogout() { if (watchId!==null&&navigator.geolocation) navigator.geolocation.clearWatch(watchId); watchId=null; }
 document.addEventListener('click',event=>{void action(event);});
@@ -406,15 +416,21 @@ document.addEventListener('submit',event=>{
   if (event.target.id==='loginForm') {
     event.preventDefault();
     const email=event.target.elements.email.value.trim().toLowerCase();
+    const password=event.target.elements.password.value;
+    if(!email||!password)return;
+    void (async()=>{try{checked(await supabase.auth.signInWithPassword({email,password}));await boot();}catch(error){toast(error.message||'Неверная почта или пароль');}})();
+  }
+  if (event.target.id==='linkForm') {
+    event.preventDefault();const email=event.target.elements.email.value.trim().toLowerCase();
     if(!email)return;
     void (async()=>{try{checked(await supabase.auth.signInWithOtp({email,options:{emailRedirectTo:new URL('./',location.href).href}}));authScreen('Проверьте почту',`Ссылка для входа отправлена на ${email}. Откройте письмо и вернитесь на сайт.`,`<button class="btn" data-action="reload">Ввести другую почту</button>`);}catch(error){toast(error.message);}})();
   }
-  if (event.target.id==='staffForm'&&staff?.role==='manager') {
+  if (event.target.id==='staffForm'&&staff?.role==='manager'&&staff.can_manage_access) {
     event.preventDefault();const f=event.target;const role=f.elements.role.value,store=f.elements.store_id.value||null;
     if(role==='barista'&&!store)return toast('Для бариста выберите точку');
     void run(async()=>checked(await supabase.from('gl_staff').insert({email:f.elements.email.value.trim().toLowerCase(),full_name:f.elements.full_name.value.trim(),role,store_id:store}).select().single()),'Сотрудник добавлен');
   }
-  if (event.target.id==='storeForm'&&staff?.role==='manager') {
+  if (event.target.id==='storeForm'&&staff?.role==='manager'&&staff.can_manage_access) {
     event.preventDefault();const f=event.target;
     void run(async()=>checked(await supabase.from('gl_stores').insert({id:crypto.randomUUID(),name:f.elements.name.value.trim(),district:f.elements.district.value.trim(),active:true}).select().single()),'Точка добавлена');
   }
