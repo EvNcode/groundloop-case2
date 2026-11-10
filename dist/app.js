@@ -15,8 +15,8 @@ import {
   parseCsv,
   round,
   validateSaleDraft,
-} from "./logic.js";
-import { cloudEnabled, openDemoSession, readWorkspace, createWorkspace, updateWorkspace } from "./cloud.js";
+} from "./logic.js?v=20261110b";
+import { cloudEnabled, openDemoSession, readWorkspace, createWorkspace, updateWorkspace } from "./cloud.js?v=20261110b";
 
 const TODAY = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Qyzylorda", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const dayAgo = (days) => new Date(Date.parse(`${TODAY}T12:00:00Z`) - days * 86400000).toISOString().slice(0, 10);
