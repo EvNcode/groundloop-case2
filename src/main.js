@@ -485,6 +485,8 @@ async function drawOperationsMap() {
 }
 function setRouteMeta(value) { const el=document.querySelector('#routeMeta');if(el)el.textContent=value; }
 function drawImageryFallback(element,center,trip,target,driver) {
+  const styleControls=document.querySelector('.map-styles');
+  if(styleControls)styleControls.hidden=true;
   const map=L.map(element,{zoomControl:true,scrollWheelZoom:false}).setView(center,13);
   activeMap=map; activeBaseLayer=basemap(map);
   for(const store of records.stores.filter(s=>staff.role!=='barista'||s.id===staff.store_id)){

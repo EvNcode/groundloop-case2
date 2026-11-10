@@ -156,6 +156,7 @@ body[data-theme="dark"] .card-head,body[data-theme="dark"] .item,body[data-theme
 body[data-theme="dark"] .tab{color:#a5b9ad}body[data-theme="dark"] .tab:hover,body[data-theme="dark"] .map-stop:hover{background:#293a2f;color:#e9f4eb}
 body[data-theme="dark"] .tab.active,body[data-theme="dark"] .map-stop.selected,body[data-theme="dark"] .trip-choice.selected{background:#254535;color:#a9e1bd}
 body[data-theme="dark"] .btn,body[data-theme="dark"] .theme-toggle,body[data-theme="dark"] .trip-choice,body[data-theme="dark"] .map-styles,body[data-theme="dark"] .map-style.selected{background:#26362c;color:#dcece0;border-color:#455b4c;box-shadow:none}
+body[data-theme="dark"] .top .theme-toggle{color:#f0fff4}
 body[data-theme="dark"] .btn:hover,body[data-theme="dark"] .theme-toggle:hover{background:#344c3a}
 body[data-theme="dark"] .btn-primary,body[data-theme="dark"] .btn-primary:hover{background:#278653;border-color:#278653;color:#fff}
 body[data-theme="dark"] .btn-danger{color:#efaa9d;border-color:#76544a}
@@ -171,3 +172,4 @@ body[data-theme="dark"] .shift-strip strong,body[data-theme="dark"] .card-empty 
 body[data-theme="dark"] .map-foot,body[data-theme="dark"] .map-toolbar-main span,body[data-theme="dark"] .map-stop small,body[data-theme="dark"] .trip-choice span{color:#a5b8a9}
 body[data-theme="dark"] .operations-map{background:#19231e}
 @media(max-width:640px){.theme-toggle span{display:none}.history-search{grid-template-columns:minmax(0,1fr) 130px}.history-search label:last-child{grid-column:1/-1}.arrival-banner{flex-wrap:wrap}.arrival-banner .btn{margin-left:21px}body[data-theme="dark"] .tabs{border-color:#334239}body[data-theme="dark"][data-role="barista"] .tabs,body[data-theme="dark"][data-role="logistics"] .tabs,body[data-theme="dark"][data-role="production"] .tabs{background:#17221e;border-color:#34473c}body[data-theme="dark"] .tab.active{background:#203c2b!important}}
+@media(max-width:640px){body[data-role="barista"] .tabs,body[data-role="logistics"] .tabs,body[data-role="production"] .tabs{top:auto;height:auto;align-items:stretch}}
