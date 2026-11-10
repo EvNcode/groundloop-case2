@@ -33,6 +33,7 @@ const number = (n, digits = 2) => new Intl.NumberFormat('ru-RU', { maximumFracti
 const word = (n, one, few, many) => { const x = Math.abs(Number(n)) % 100, last = x % 10; return x >= 11 && x <= 14 ? many : last === 1 ? one : last >= 2 && last <= 4 ? few : many; };
 const dateTime = value => value ? new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Qyzylorda' }).format(new Date(value)) : '—';
 const storeName = id => records.stores.find(s => s.id === id)?.name || id;
+const storeAddress = id => records.stores.find(s => s.id === id)?.address || '';
 const byNewest = (a, b) => new Date(b.created_at) - new Date(a.created_at);
 const badge = status => `<span class="badge ${statuses[status]?.[1] || 'neutral'}">${esc(statuses[status]?.[0] || status)}</span>`;
 const empty = (title, text) => `<div class="card-empty"><strong>${esc(title)}</strong><span>${esc(text)}</span></div>`;
@@ -62,6 +63,10 @@ function loginScreen(mode = 'password') {
   }
   authScreen('Вход в рабочее место', 'Введите почту и пароль сотрудника.',
     `<form id="loginForm" class="form"><label class="field">Почта<input type="email" name="email" autocomplete="username" required placeholder="name@company.kz"></label><label class="field">Пароль<input type="password" name="password" autocomplete="current-password" required></label><button class="btn btn-primary" type="submit">Войти</button><button class="btn-link" type="button" data-action="link-login">Войти по ссылке</button></form>`);
+}
+function setPasswordScreen() {
+  authScreen('Задайте пароль', 'Приглашение подтверждено. Создайте пароль для следующих входов.',
+    `<form id="setPasswordForm" class="form"><label class="field">Новый пароль<input type="password" name="password" autocomplete="new-password" minlength="10" required></label><label class="field">Повторите пароль<input type="password" name="confirm" autocomplete="new-password" minlength="10" required></label><button class="btn btn-primary" type="submit">Сохранить пароль</button></form>`);
 }
 function modal(title, html) {
   closeModal();
@@ -104,7 +109,7 @@ async function refresh() {
     if (!staff || currentStaff.role !== staff.role) { location.replace(link(`${currentStaff.role}.html`)); return; }
     staff = currentStaff;
     const queries = [
-      ['stores', 'gl_stores', 'id,name,district,active'],
+      ['stores', 'gl_stores', 'id,name,district,address,active'],
       ['trips', 'gl_trips', '*'], ['containers', 'gl_containers', '*'],
       ['batches', 'gl_batches', '*'], ['sales', 'gl_sales', '*'],
       ['positions', 'gl_driver_positions', '*'], ['events', 'gl_events', '*'],
@@ -138,6 +143,7 @@ async function boot() {
   if (!email) return loginScreen();
   staff = checked(await supabase.from('gl_staff').select('*').eq('email', email).maybeSingle());
   if (!staff || !staff.active) return authScreen('Доступ не назначен', `Учётная запись ${email} подтверждена. Руководитель должен добавить её в команду.`, '<button class="btn" data-action="logout">Выйти</button>');
+  if (user.user_metadata?.groundloop_needs_password) return setPasswordScreen();
   if (rolePage !== staff.role) { location.replace(link(`${staff.role}.html`)); return; }
   await refresh();
   subscribe();
@@ -180,6 +186,8 @@ async function completeScan(item, kind, rawCode) {
 
 function containerItem(item, role) {
   const owner = `${esc(item.barista_name)} · ${esc(storeName(item.store_id))}`;
+  const pickupStore = records.stores.find(s => s.id === item.store_id);
+  const pickup = role === 'logistics' ? `<div class="item-sub pickup-address">Адрес вывоза: ${esc(storeAddress(item.store_id) || `${pickupStore?.district || 'район не указан'} · точный адрес уточняется`)}</div>` : '';
   const note = item.note ? `<div class="item-note">${esc(item.note)}</div>` : '';
   let actions = '';
   if (role === 'barista') {
@@ -200,7 +208,7 @@ function containerItem(item, role) {
     if (item.status === 'picked_up') actions = button('Сканировать приёмку', 'receive', `data-id="${item.id}"`, 'btn-sm btn-primary');
     if (item.status === 'received') actions = button('Отменить приёмку', 'undo-receive', `data-id="${item.id}"`, 'btn-sm btn-danger');
   }
-  return `<article class="item"><div class="item-top"><div><div class="item-title mono">${esc(item.code)}</div><div class="item-sub">${owner}</div></div>${badge(item.status)}</div><div class="item-meta"><span><strong>${number(item.wet_kg)} кг</strong></span><span>${item.cups ? `${number(item.cups,0)} ${word(item.cups,'напиток','напитка','напитков')}` : 'Вес измерен'}</span><span>${dateTime(item.created_at)}</span></div>${note}${actions ? `<div class="item-actions">${actions}</div>` : ''}</article>`;
+  return `<article class="item"><div class="item-top"><div><div class="item-title mono">${esc(item.code)}</div><div class="item-sub">${owner}</div>${pickup}</div>${badge(item.status)}</div><div class="item-meta"><span><strong>${number(item.wet_kg)} кг</strong></span><span>${item.cups ? `${number(item.cups,0)} ${word(item.cups,'напиток','напитка','напитков')}` : 'Вес измерен'}</span><span>${dateTime(item.created_at)}</span></div>${note}${actions ? `<div class="item-actions">${actions}</div>` : ''}</article>`;
 }
 
 function renderBarista() {
@@ -343,9 +351,9 @@ function renderManagement() {
     const liveTrip=records.trips.filter(x=>x.status==='active');
     body += `<section class="stats">${stat('Контейнеров',activeContainers.length,`${number(activeContainers.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`)}${stat('В пути',records.containers.filter(x=>['assigned','picked_up'].includes(x.status)).length)}${stat('Выпущено',`${produced} уп.`)}${stat('Выручка',money(revenue),`${sold} уп. продано`)}</section><div class="grid"><div class="stack"><section class="card"><div class="card-head"><div><h2>Поток материала</h2><p>По фактическим операциям команды</p></div></div><div class="card-body split-values"><div><span>Готово на точках</span><strong>${records.containers.filter(x=>x.status==='ready').length}</strong></div><div><span>У логиста</span><strong>${records.containers.filter(x=>['assigned','picked_up'].includes(x.status)).length}</strong></div><div><span>Принято в цех</span><strong>${records.containers.filter(x=>['received','batched'].includes(x.status)).length}</strong></div><div><span>Остаток упаковок</span><strong>${produced-sold}</strong></div></div></section><section class="card"><div class="card-head"><h2>Последние действия</h2></div>${[...records.events].sort(byNewest).slice(0,18).map(e=>`<div class="item"><div class="item-top"><div><div class="item-title">${esc(eventLabel(e.action,e.entity))}</div><div class="item-sub">${esc(e.actor_email||'Система')} · ${dateTime(e.created_at)}</div></div><span class="mono muted">${esc(e.details?.code||records.containers.find(x=>x.id===e.entity_id)?.code||records.trips.find(x=>x.id===e.entity_id)?.code||records.batches.find(x=>x.id===e.entity_id)?.code||'')}</span></div></div>`).join('')||empty('История пуста','Действия сотрудников появятся здесь.')}</section></div><aside class="stack">${liveTrip.length?liveTrip.map(x=>locationCard(x,true)).join(''):locationCard(null,true)}<div class="notice">Экономика здесь основана на зарегистрированных продажах. Расходы и прибыль появятся после ввода фактических затрат.</div></aside></div>`;
   } else if (activeTab==='staff') {
-    body += `<div class="grid"><section class="card"><div class="card-head"><div><h2>Сотрудники</h2><p>Роль и точка определяют доступные действия</p></div></div>${[...records.staff].sort((a,b)=>a.full_name.localeCompare(b.full_name,'ru')).map(s=>`<div class="item"><div class="item-top"><div><div class="item-title">${esc(s.full_name)}</div><div class="item-sub">${esc(s.email)} · ${esc(pageNames[s.role])}${s.store_id?` · ${esc(storeName(s.store_id))}`:''}</div></div>${s.active?'<span class="badge">Активен</span>':'<span class="badge neutral">Отключён</span>'}</div><div class="item-actions">${button('Изменить','edit-staff',`data-id="${esc(s.email)}"`,'btn-sm')}</div></div>`).join('')||empty('Команда пуста','Добавьте сотрудников.')}</section><aside class="stack"><section class="card"><div class="card-head"><h2>Назначить доступ</h2></div><div class="card-body"><form id="staffForm" class="form"><label class="field">Рабочая почта<input name="email" type="email" required autocomplete="off"></label><label class="field">Имя и фамилия<input name="full_name" required minlength="2" maxlength="100"></label><label class="field">Роль<select name="role"><option value="barista">Бариста</option><option value="logistics">Логистика</option><option value="production">Производство</option><option value="manager">Управление</option></select></label><label class="field">Точка<select name="store_id"><option value="">Без точки</option>${records.stores.filter(x=>x.active).map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('')}</select></label><button class="btn btn-primary" type="submit">Добавить сотрудника</button></form></div></section><div class="notice">Сотрудник открывает сайт по ссылке из письма. Доступ включится только после подтверждения этой почты.</div></aside></div>`;
+    body += `<div class="grid"><section class="card"><div class="card-head"><div><h2>Сотрудники</h2><p>Роль и точка определяют доступные действия</p></div></div>${[...records.staff].sort((a,b)=>a.full_name.localeCompare(b.full_name,'ru')).map(s=>`<div class="item"><div class="item-top"><div><div class="item-title">${esc(s.full_name)}</div><div class="item-sub">${esc(s.email)} · ${esc(pageNames[s.role])}${s.store_id?` · ${esc(storeName(s.store_id))}`:''}</div></div>${s.active?'<span class="badge">Активен</span>':'<span class="badge neutral">Отключён</span>'}</div><div class="item-actions">${button('Изменить','edit-staff',`data-id="${esc(s.email)}"`,'btn-sm')}</div></div>`).join('')||empty('Команда пуста','Пригласите первого сотрудника.')}</section><aside class="stack"><section class="card"><div class="card-head"><h2>Пригласить сотрудника</h2></div><div class="card-body"><form id="staffForm" class="form"><label class="field">Рабочая почта<input name="email" type="email" required autocomplete="off"></label><label class="field">Имя и фамилия<input name="full_name" required minlength="2" maxlength="100"></label><label class="field">Роль<select name="role"><option value="barista">Бариста</option><option value="logistics">Логистика</option><option value="production">Производство</option><option value="manager">Управление</option></select></label><label class="field">Точка бариста<select name="store_id"><option value="">Выберите точку</option>${records.stores.filter(x=>x.active).map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('')}</select></label><button class="btn btn-primary" type="submit">Отправить приглашение</button></form></div></section><div class="notice">Только администратор приглашает сотрудников. После подтверждения почты сотрудник задаёт собственный пароль.</div></aside></div>`;
   } else if (activeTab==='stores') {
-    body += `<div class="grid"><section class="card"><div class="card-head"><div><h2>Точки сбора</h2><p>Адреса и доступность для назначения бариста</p></div></div>${[...records.stores].sort((a,b)=>a.name.localeCompare(b.name,'ru')).map(s=>`<div class="item"><div class="item-top"><div><div class="item-title">${esc(s.name)}</div><div class="item-sub">${esc(s.district||'Адрес не указан')}</div></div>${s.active?'<span class="badge">Активна</span>':'<span class="badge neutral">Отключена</span>'}</div><div class="item-actions">${button('Изменить','edit-store',`data-id="${esc(s.id)}"`,'btn-sm')}</div></div>`).join('')||empty('Точек пока нет','Добавьте первую точку.')}</section><aside class="stack"><section class="card"><div class="card-head"><h2>Добавить точку</h2></div><div class="card-body"><form id="storeForm" class="form"><label class="field">Название точки<input name="name" required maxlength="120" placeholder="Global Coffee — название"></label><label class="field">Адрес или район<input name="district" maxlength="160" placeholder="Город, улица, дом"></label><button class="btn btn-primary" type="submit">Добавить точку</button></form></div></section></aside></div>`;
+    body += `<div class="grid"><section class="card"><div class="card-head"><div><h2>Точки сбора</h2><p>Адреса вывоза и назначение бариста</p></div></div>${[...records.stores].sort((a,b)=>a.name.localeCompare(b.name,'ru')).map(s=>`<div class="item"><div class="item-top"><div><div class="item-title">${esc(s.name)}</div><div class="item-sub">${esc(s.address||'Адрес вывоза не указан')}${s.district?` · ${esc(s.district)}`:''}</div></div>${s.active?'<span class="badge">Активна</span>':'<span class="badge neutral">Отключена</span>'}</div><div class="item-actions">${button('Изменить','edit-store',`data-id="${esc(s.id)}"`,'btn-sm')}</div></div>`).join('')||empty('Точек пока нет','Добавьте первую точку.')}</section><aside class="stack"><section class="card"><div class="card-head"><h2>Добавить точку</h2></div><div class="card-body"><form id="storeForm" class="form"><label class="field">Название точки<input name="name" required maxlength="120" placeholder="Global Coffee — название"></label><label class="field">Адрес вывоза<input name="address" required maxlength="200" placeholder="Город, улица, дом"></label><label class="field">Район<input name="district" maxlength="160"></label><button class="btn btn-primary" type="submit">Добавить точку</button></form></div></section></aside></div>`;
   } else {
     const available=records.batches.filter(b=>b.status==='complete'&&b.produced_packs-records.sales.filter(s=>s.batch_id===b.id).reduce((sum,s)=>sum+s.packs,0)>0);
     body += `<section class="stats">${stat('Произведено',`${produced} уп.`)}${stat('Продано',`${sold} уп.`)}${stat('Остаток',`${produced-sold} уп.`)}${stat('Выручка',money(revenue))}</section><div class="grid"><section class="card"><div class="card-head"><div><h2>Операции продаж</h2><p>Партия, количество и выручка</p></div></div>${[...records.sales].sort(byNewest).map(s=>`<div class="item"><div class="item-top"><div><div class="item-title mono">${esc(records.batches.find(b=>b.id===s.batch_id)?.code||s.batch_id)}</div><div class="item-sub">${esc(s.channel)} · ${dateTime(s.created_at)}</div></div><strong>${money(s.packs*Number(s.unit_price))}</strong></div><div class="item-meta"><span>${s.packs} уп.</span><span>${money(s.unit_price)} за упаковку</span></div></div>`).join('')||empty('Продаж ещё нет','Зафиксируйте первую выдачу готового продукта.')}</section><aside class="stack"><section class="card"><div class="card-head"><h2>Новая продажа</h2></div><div class="card-body"><form id="saleForm" class="form"><label class="field">Партия<select name="batch_id" required>${available.map(b=>`<option value="${b.id}">${esc(b.code)} · ${b.produced_packs-records.sales.filter(s=>s.batch_id===b.id).reduce((sum,s)=>sum+s.packs,0)} уп.</option>`).join('')}</select></label><label class="field">Упаковок<input name="packs" type="number" min="1" step="1" inputmode="numeric" required></label><label class="field">Цена за упаковку, ₸<input name="unit_price" type="number" min="0" step="1" inputmode="numeric" required></label><label class="field">Канал<select name="channel"><option>Кофейня</option><option>Партнёрская точка</option><option>Прямой заказ</option></select></label><button class="btn btn-primary" type="submit" ${available.length?'':'disabled'}>Зафиксировать продажу</button></form></div></section></aside></div>`;
@@ -358,16 +366,16 @@ function render() { if (!staff) return; if (staff.role==='barista') renderBarist
 function staffEditDialog(member) {
   const dialog=modal('Изменить доступ',`<form id="editStaffForm" class="form"><div class="notice">${esc(member.email)}</div><label class="field">Имя и фамилия<input name="full_name" required minlength="2" maxlength="100" value="${esc(member.full_name)}"></label><label class="field">Роль<select name="role">${Object.entries(pageNames).map(([id,name])=>`<option value="${id}" ${member.role===id?'selected':''}>${name}</option>`).join('')}</select></label><label class="field">Точка<select name="store_id"><option value="">Без точки</option>${records.stores.map(s=>`<option value="${esc(s.id)}" ${member.store_id===s.id?'selected':''}>${esc(s.name)}</option>`).join('')}</select></label><label class="checkrow"><input name="active" type="checkbox" ${member.active?'checked':''}><span>Доступ активен</span></label><div class="form-actions"><button class="btn" type="button" data-action="close-modal">Отмена</button><button class="btn btn-primary" type="submit">Сохранить</button></div></form>`);
   dialog.querySelector('#editStaffForm').addEventListener('submit',event=>{
-    event.preventDefault();const f=event.currentTarget;const role=f.elements.role.value,store=f.elements.store_id.value||null;
+    event.preventDefault();const f=event.currentTarget;const role=f.elements.role.value,store=role==='barista'?f.elements.store_id.value||null:null;
     if(role==='barista'&&!store)return toast('Бариста нужна точка');
     void run(async()=>checked(await supabase.from('gl_staff').update({full_name:f.elements.full_name.value.trim(),role,store_id:store,active:f.elements.active.checked}).eq('email',member.email).select().single()),'Доступ обновлён');
   });
 }
 function storeEditDialog(store) {
-  const dialog=modal('Изменить точку',`<form id="editStoreForm" class="form"><label class="field">Название точки<input name="name" required maxlength="120" value="${esc(store.name)}"></label><label class="field">Адрес или район<input name="district" maxlength="160" value="${esc(store.district||'')}"></label><label class="checkrow"><input name="active" type="checkbox" ${store.active?'checked':''}><span>Точка активна</span></label><div class="form-actions"><button class="btn" type="button" data-action="close-modal">Отмена</button><button class="btn btn-primary" type="submit">Сохранить</button></div></form>`);
+  const dialog=modal('Изменить точку',`<form id="editStoreForm" class="form"><label class="field">Название точки<input name="name" required maxlength="120" value="${esc(store.name)}"></label><label class="field">Адрес вывоза<input name="address" required maxlength="200" value="${esc(store.address||'')}"></label><label class="field">Район<input name="district" maxlength="160" value="${esc(store.district||'')}"></label><label class="checkrow"><input name="active" type="checkbox" ${store.active?'checked':''}><span>Точка активна</span></label><div class="form-actions"><button class="btn" type="button" data-action="close-modal">Отмена</button><button class="btn btn-primary" type="submit">Сохранить</button></div></form>`);
   dialog.querySelector('#editStoreForm').addEventListener('submit',event=>{
     event.preventDefault();const f=event.currentTarget;
-    void run(async()=>checked(await supabase.from('gl_stores').update({name:f.elements.name.value.trim(),district:f.elements.district.value.trim(),active:f.elements.active.checked}).eq('id',store.id).select().single()),'Точка обновлена');
+    void run(async()=>checked(await supabase.from('gl_stores').update({name:f.elements.name.value.trim(),address:f.elements.address.value.trim(),district:f.elements.district.value.trim(),active:f.elements.active.checked}).eq('id',store.id).select().single()),'Точка обновлена');
   });
 }
 async function action(event) {
@@ -421,19 +429,25 @@ document.addEventListener('submit',event=>{
     if(!email||!password)return;
     void (async()=>{try{checked(await supabase.auth.signInWithPassword({email,password}));await boot();}catch(error){toast(error.message||'Неверная почта или пароль');}})();
   }
+  if (event.target.id==='setPasswordForm') {
+    event.preventDefault();const f=event.target;
+    const password=f.elements.password.value;
+    if(password.length<10||password!==f.elements.confirm.value)return toast('Пароли должны совпадать и содержать не меньше 10 символов');
+    void (async()=>{try{checked(await supabase.auth.updateUser({password,data:{groundloop_needs_password:false}}));await boot();}catch(error){toast(error.message||'Пароль не сохранён');}})();
+  }
   if (event.target.id==='linkForm') {
     event.preventDefault();const email=event.target.elements.email.value.trim().toLowerCase();
     if(!email)return;
-    void (async()=>{try{checked(await supabase.auth.signInWithOtp({email,options:{emailRedirectTo:new URL('./',location.href).href}}));authScreen('Проверьте почту',`Ссылка для входа отправлена на ${email}. Откройте письмо и вернитесь на сайт.`,`<button class="btn" data-action="reload">Ввести другую почту</button>`);}catch(error){toast(error.message);}})();
+    void (async()=>{try{checked(await supabase.auth.signInWithOtp({email,options:{shouldCreateUser:false,emailRedirectTo:new URL('./',location.href).href}}));authScreen('Проверьте почту',`Если адрес есть в команде, ссылка для входа отправлена на ${email}.`,`<button class="btn" data-action="reload">Ввести другую почту</button>`);}catch(error){toast(error.message);}})();
   }
   if (event.target.id==='staffForm'&&staff?.role==='manager'&&staff.can_manage_access) {
     event.preventDefault();const f=event.target;const role=f.elements.role.value,store=f.elements.store_id.value||null;
     if(role==='barista'&&!store)return toast('Для бариста выберите точку');
-    void run(async()=>checked(await supabase.from('gl_staff').insert({email:f.elements.email.value.trim().toLowerCase(),full_name:f.elements.full_name.value.trim(),role,store_id:store}).select().single()),'Сотрудник добавлен');
+    void run(async()=>{const {data,error}=await supabase.functions.invoke('groundloop-invite',{body:{email:f.elements.email.value.trim().toLowerCase(),full_name:f.elements.full_name.value.trim(),role,store_id:role==='barista'?store:null}});if(error){let message=error.message;try{message=(await error.context.json()).message||message;}catch{}throw new Error(message);}if(!data?.message)throw new Error('Сервер не подтвердил приглашение');},'Приглашение отправлено');
   }
   if (event.target.id==='storeForm'&&staff?.role==='manager'&&staff.can_manage_access) {
     event.preventDefault();const f=event.target;
-    void run(async()=>checked(await supabase.from('gl_stores').insert({id:crypto.randomUUID(),name:f.elements.name.value.trim(),district:f.elements.district.value.trim(),active:true}).select().single()),'Точка добавлена');
+    void run(async()=>checked(await supabase.from('gl_stores').insert({id:crypto.randomUUID(),name:f.elements.name.value.trim(),address:f.elements.address.value.trim(),district:f.elements.district.value.trim(),active:true}).select().single()),'Точка добавлена');
   }
   if (event.target.id==='saleForm'&&staff?.role==='manager') {
     event.preventDefault();const f=event.target;
