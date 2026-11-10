@@ -5,6 +5,13 @@
   "type": "module",
   "description": "GroundLoop hackathon MVP for coffee grounds collection, processing and unit economics.",
   "scripts": {
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "build": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.119.0",
+    "@zxing/browser": "^0.2.1",
+    "esbuild": "^0.28.2",
+    "qrcode": "^1.5.4"
   }
 }
