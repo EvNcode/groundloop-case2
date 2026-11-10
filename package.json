@@ -12,6 +12,7 @@
     "@supabase/supabase-js": "^2.119.0",
     "@zxing/browser": "^0.2.1",
     "esbuild": "^0.28.2",
+    "leaflet": "^1.9.4",
     "qrcode": "^1.5.4"
   }
 }

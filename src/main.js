@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { BrowserQRCodeReader } from '@zxing/browser';
 import QRCode from 'qrcode';
+import L from 'leaflet';
 import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from '../dist/supabase-config.js';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
@@ -14,11 +15,17 @@ const statuses = {
   cancelled: ['Отменён', 'neutral'], assigned: ['В рейсе', 'warn'], picked_up: ['Забран', 'good'],
   received: ['Принят в цех', 'good'], batched: ['В партии', 'neutral'],
   drying: ['Сушка', 'warn'], production: ['Формование', 'warn'], complete: ['Готово', 'good'],
+  out_for_delivery: ['В доставке', 'warn'], delivered: ['Передано', 'good'],
 };
 let user = null;
 let staff = null;
-let records = { stores: [], staff: [], trips: [], containers: [], batches: [], sales: [], positions: [], events: [] };
+let records = { stores: [], staff: [], trips: [], containers: [], batches: [], sales: [], positions: [], events: [], notifications: [] };
 let activeTab = 'overview';
+let selectedMapTrip = null;
+let journalFilter = 'all';
+let activeMap = null;
+let gpsAttemptedTrip = null;
+let lastNotificationId = null;
 let refreshing = false;
 let queuedRefresh = false;
 let busy = false;
@@ -40,6 +47,9 @@ const empty = (title, text) => `<div class="card-empty"><strong>${esc(title)}</s
 const button = (label, action, extra = '', kind = '') => `<button class="btn ${kind}" type="button" data-action="${action}" ${extra}>${esc(label)}</button>`;
 const stat = (label, value, hint = '') => `<article class="stat"><span>${esc(label)}</span><strong>${esc(value)}</strong>${hint ? `<small>${esc(hint)}</small>` : ''}</article>`;
 const link = path => new URL(path, location.href).href;
+const ageMs = value => Date.now() - Date.parse(value);
+const archivedContainer = item => ageMs(item.created_at) > 86400000 && ['cancelled','rejected','received','batched'].includes(item.status);
+const tabs = items => `<nav class="tabs" aria-label="Разделы">${items.map(([id,label])=>`<button class="tab ${activeTab===id?'active':''}" data-action="tab" data-id="${id}">${label}</button>`).join('')}</nav>`;
 
 function toast(message) {
   const el = document.querySelector('#toast');
@@ -48,9 +58,21 @@ function toast(message) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), 4300);
 }
-function brand() { return `<a class="brand" href="./index.html"><span class="mark"></span>GroundLoop</a>`; }
+function brand() { return `<a class="brand" href="./index.html">GroundLoop<span class="brand-dot" aria-hidden="true">.</span></a>`; }
 function shell(title, subtitle, actions, body) {
-  app.innerHTML = `<div class="shell"><header class="top">${brand()}<div class="top-right"><div class="top-user"><strong>${esc(staff.full_name)}</strong><small>${esc(user.email)}</small></div><button data-action="logout">Выйти</button></div></header><main class="container"><section class="hero"><div><div class="eyebrow">${esc(pageNames[staff.role])}${staff.store_id ? ` / ${esc(storeName(staff.store_id))}` : ''}</div><h1>${esc(title)}</h1><p>${esc(subtitle)}</p></div><div class="hero-actions">${actions || ''}</div></section>${body}</main></div>`;
+  if (activeMap) { activeMap.remove(); activeMap = null; }
+  app.innerHTML = `<div class="shell"><header class="top">${brand()}<div class="top-right"><div class="top-user"><strong>${esc(staff.full_name)}</strong><small>${esc(user.email)}</small></div><button data-action="logout">Выйти</button></div></header><main class="container"><section class="hero"><div><div class="eyebrow">${esc(pageNames[staff.role])}${staff.store_id ? ` / ${esc(storeName(staff.store_id))}` : ''}</div><h1>${esc(title)}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="hero-actions">${actions || ''}</div></section>${body}</main></div>`;
+  syncDeliveryField();
+  if (document.querySelector('#operationsMap')) requestAnimationFrame(() => void drawOperationsMap());
+}
+function syncDeliveryField() {
+  const form=document.querySelector('#saleForm');
+  if(!form)return;
+  const delivery=form.elements.fulfillment.value==='delivery';
+  const field=form.elements.delivery_address.closest('label');
+  field.hidden=!delivery;
+  form.elements.delivery_address.required=delivery;
+  form.querySelector('[data-action=delivery-pin]').hidden=!delivery;
 }
 function authScreen(title, description, content) {
   app.innerHTML = `<div class="auth-wrap"><div class="auth-card">${brand()}<h1>${esc(title)}</h1><p>${esc(description)}</p>${content}</div></div>`;
@@ -109,15 +131,17 @@ async function refresh() {
     if (!staff || currentStaff.role !== staff.role) { location.replace(link(`${currentStaff.role}.html`)); return; }
     staff = currentStaff;
     const queries = [
-      ['stores', 'gl_stores', 'id,name,district,address,active'],
+      ['stores', 'gl_stores', 'id,name,district,address,latitude,longitude,active'],
       ['trips', 'gl_trips', '*'], ['containers', 'gl_containers', '*'],
       ['batches', 'gl_batches', '*'], ['sales', 'gl_sales', '*'],
       ['positions', 'gl_driver_positions', '*'], ['events', 'gl_events', '*'],
+      ['notifications', 'gl_notifications', '*'],
     ];
     if (staff.role === 'manager') queries.push(['staff', 'gl_staff', '*']);
     const results = await Promise.all(queries.map(async ([key, table, columns]) => [key, checked(await supabase.from(table).select(columns).limit(1000))]));
     for (const [key, value] of results) records[key] = value;
-    render();
+    if (staff.role === 'logistics') syncGps();
+    if (!document.querySelector('#activeDialog') && !document.activeElement?.closest('#saleForm,#staffForm,#storeForm')) render();
   } catch (error) { console.error(error); toast(`Не удалось обновить данные: ${error.message}`); }
   finally { refreshing = false; if (queuedRefresh) { queuedRefresh = false; void refresh(); } }
 }
@@ -129,6 +153,7 @@ function subscribe() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'gl_sales' }, () => void refresh())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'gl_driver_positions' }, () => void refresh())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'gl_staff' }, () => void refresh())
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'gl_notifications' }, () => void refresh())
     .subscribe();
   setInterval(() => { if (!document.hidden) void refresh(); }, 20000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) void refresh(); });
@@ -144,6 +169,7 @@ async function boot() {
   staff = checked(await supabase.from('gl_staff').select('*').eq('email', email).maybeSingle());
   if (!staff || !staff.active) return authScreen('Доступ не назначен', `Учётная запись ${email} подтверждена. Руководитель должен добавить её в команду.`, '<button class="btn" data-action="logout">Выйти</button>');
   if (user.user_metadata?.groundloop_needs_password) return setPasswordScreen();
+  activeTab = ({ barista:'requests', logistics:'requests', production:'intake', manager:'overview' })[staff.role];
   if (rolePage !== staff.role) { location.replace(link(`${staff.role}.html`)); return; }
   await refresh();
   subscribe();
@@ -188,14 +214,16 @@ function containerItem(item, role) {
   const owner = `${esc(item.barista_name)} · ${esc(storeName(item.store_id))}`;
   const pickupStore = records.stores.find(s => s.id === item.store_id);
   const pickup = role === 'logistics' ? `<div class="item-sub pickup-address">Адрес вывоза: ${esc(storeAddress(item.store_id) || `${pickupStore?.district || 'район не указан'} · точный адрес уточняется`)}</div>` : '';
-  const note = item.note ? `<div class="item-note">${esc(item.note)}</div>` : '';
+  const carrier = role === 'barista' && item.trip_id ? records.trips.find(t => t.id === item.trip_id) : null;
+  const handoff = carrier ? `<div class="handoff-line">${item.status === 'assigned' ? 'Заявку взял' : 'Забрал'} ${esc(carrier.driver_name)} · ${esc(carrier.code)}</div>` : '';
+  const note = role === 'barista' && item.note && item.status !== 'ready' ? `<div class="item-note">${esc(item.note)}</div>` : '';
   let actions = '';
   if (role === 'barista') {
     actions = `${button('Показать QR', 'qr', `data-id="${item.id}"`, 'btn-sm')}`;
     if (item.created_by === user.id && ['ready','hold','rejected'].includes(item.status)) {
-      actions += `${button('Исправить', 'edit-container', `data-id="${item.id}"`, 'btn-sm')}${button('Отменить запись', 'cancel-container', `data-id="${item.id}"`, 'btn-sm btn-danger')}`;
+      actions += `${button('Исправить', 'edit-container', `data-id="${item.id}"`, 'btn-sm')}${button('Отменить заявку', 'cancel-container', `data-id="${item.id}"`, 'btn-sm btn-danger')}`;
     } else if (item.created_by === user.id && item.status === 'assigned') {
-      actions += button('Отменить до вывоза', 'cancel-container', `data-id="${item.id}"`, 'btn-sm btn-danger');
+      actions += button('Отменить заявку', 'cancel-container', `data-id="${item.id}"`, 'btn-sm btn-danger');
     }
   }
   if (role === 'logistics') {
@@ -208,17 +236,20 @@ function containerItem(item, role) {
     if (item.status === 'picked_up') actions = button('Сканировать приёмку', 'receive', `data-id="${item.id}"`, 'btn-sm btn-primary');
     if (item.status === 'received') actions = button('Отменить приёмку', 'undo-receive', `data-id="${item.id}"`, 'btn-sm btn-danger');
   }
-  return `<article class="item"><div class="item-top"><div><div class="item-title mono">${esc(item.code)}</div><div class="item-sub">${owner}</div>${pickup}</div>${badge(item.status)}</div><div class="item-meta"><span><strong>${number(item.wet_kg)} кг</strong></span><span>${item.cups ? `${number(item.cups,0)} ${word(item.cups,'напиток','напитка','напитков')}` : 'Вес измерен'}</span><span>${dateTime(item.created_at)}</span></div>${note}${actions ? `<div class="item-actions">${actions}</div>` : ''}</article>`;
+  return `<article class="item"><div class="item-top"><div><div class="item-title mono">${esc(item.code)}</div><div class="item-sub">${owner}</div>${pickup}${handoff}</div>${badge(item.status)}</div><div class="item-meta"><span><strong>${number(item.wet_kg)} кг</strong></span><span>${item.cups ? `${number(item.cups,0)} ${word(item.cups,'напиток','напитка','напитков')}` : 'Вес измерен'}</span><span>${dateTime(item.created_at)}</span></div>${note}${actions ? `<div class="item-actions">${actions}</div>` : ''}</article>`;
 }
 
 function renderBarista() {
   const own = records.containers.filter(x => x.store_id === staff.store_id).sort(byNewest);
   const ready = own.filter(x => x.status === 'ready');
-  const active = own.filter(x => !['cancelled','rejected'].includes(x.status));
-  const body = `<section class="stats">${stat('Готово к вывозу', ready.length, `${number(ready.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`)}${stat('В пути', own.filter(x => ['assigned','picked_up'].includes(x.status)).length)}${stat('Принято в цех', own.filter(x => ['received','batched'].includes(x.status)).length)}${stat('Записей точки', active.length)}</section>
-    <div class="grid"><section class="card"><div class="card-head"><div><h2>Контейнеры точки</h2><p>Последние записи и передача в логистику</p></div></div>${own.length ? own.map(x=>containerItem(x,'barista')).join('') : empty('Записей пока нет','Создайте запись после взвешивания контейнера.')}</section>
-    <aside class="stack"><section class="card"><div class="card-head"><h2>Проверка жмыха</h2></div><div class="card-body step-list"><div class="step"><span class="step-num">01</span><div><strong>Взвесьте контейнер</strong><small>Укажите фактический вес и число напитков</small></div></div><div class="step"><span class="step-num">02</span><div><strong>Оцените качество</strong><small>Чистый жмых готов к вывозу; сомнительный удержите на точке</small></div></div><div class="step"><span class="step-num">03</span><div><strong>Покажите код</strong><small>Логист сверит QR на контейнере при получении</small></div></div></div></section><div class="notice">Ошибочную запись можно исправить или отменить до передачи. Отмена остаётся в истории операций.</div></aside></div>`;
-  shell('Сбор на точке', 'Зафиксируйте вес и качество. Логист увидит готовый контейнер сразу после сохранения.', button('Новый контейнер','new-container','','btn-primary'), body);
+  const current = own.filter(x => !archivedContainer(x));
+  const archive = own.filter(archivedContainer);
+  const nav = tabs([['requests','Заявки'],['map','Карта'],['archive','Архив']]);
+  let body = nav;
+  if (activeTab === 'map') body += mapWorkspace('barista');
+  else if (activeTab === 'archive') body += `<section class="card"><div class="card-head"><h2>Архив заявок</h2></div>${archive.length ? archive.map(x=>containerItem(x,'barista')).join('') : empty('Архив пока пуст','Завершённые и отменённые заявки переходят сюда через 24 часа.')}</section>`;
+  else body += `<section class="stats compact-stats">${stat('Готовы к вывозу',ready.length,`${number(ready.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`)}${stat('У логиста',own.filter(x=>['assigned','picked_up'].includes(x.status)).length)}${stat('Заявки сегодня',current.length)}</section><section class="card"><div class="card-head"><h2>Заявки точки</h2></div>${current.length ? current.map(x=>containerItem(x,'barista')).join('') : empty('Сегодня заявок нет','Новая заявка появится здесь после взвешивания.')}</section>`;
+  shell('Сбор на точке', activeTab === 'map' ? 'Рейсы, которые забирают заявки вашей точки.' : '', activeTab === 'requests' ? button('Новая заявка','new-container','','btn-primary') : '', body);
 }
 
 function openContainerForm(item = null) {
@@ -227,7 +258,7 @@ function openContainerForm(item = null) {
     <label class="field">Вес жмыха, кг<input name="wet_kg" type="number" inputmode="decimal" min="0.01" step="0.01" required value="${esc(item?.wet_kg || '')}"></label>
     <label class="field">Напитков за смену<input name="cups" type="number" inputmode="numeric" min="0" step="1" value="${esc(item?.cups ?? 0)}"></label>
     <label class="field wide">Качество<select name="quality"><option value="good" ${quality==='good'?'selected':''}>Чистое, готово к вывозу</option><option value="hold" ${quality==='hold'?'selected':''}>Удержать, нужна повторная проверка</option><option value="rejected" ${quality==='rejected'?'selected':''}>Не подходит для переработки</option></select></label>
-    <label class="field wide">Комментарий для логиста и производства<textarea name="note" maxlength="600" placeholder="Например: влажный жмых, запах, примеси, контейнер заменён">${esc(item?.note || '')}</textarea></label>
+    <label class="field wide">Причина удержания или брака<textarea name="note" maxlength="600" placeholder="Заполняется только при проблеме с качеством">${quality === 'good' ? '' : esc(item?.note || '')}</textarea></label>
     <label class="checkrow wide"><input type="checkbox" name="checked" required><span>Я проверил контейнер и указал его фактическое состояние</span></label>
     <div class="form-actions wide"><button class="btn" type="button" data-action="close-modal">Отмена</button><button class="btn btn-primary" type="submit">${item?'Сохранить исправление':'Создать запись'}</button></div></form>`);
   dialog.querySelector('#containerForm').addEventListener('submit', event => {
@@ -237,7 +268,9 @@ function openContainerForm(item = null) {
     const cups = Number(form.elements.cups.value);
     const qualityValue = form.elements.quality.value;
     if (!Number.isFinite(wet) || wet <= 0 || !Number.isInteger(cups) || cups < 0) return toast('Проверьте вес и число напитков');
-    const payload = { wet_kg: wet, cups, quality: qualityValue, note: form.elements.note.value.trim() };
+    const note = qualityValue === 'good' ? '' : form.elements.note.value.trim();
+    if (qualityValue !== 'good' && !note) return toast('Укажите причину удержания или брака');
+    const payload = { wet_kg: wet, cups, quality: qualityValue, note };
     if (item) payload.status = { good:'ready', hold:'hold', rejected:'rejected' }[qualityValue];
     void run(async () => {
       if (item) checked(await supabase.from('gl_containers').update(payload).eq('id', item.id).eq('version', item.version).select().single());
@@ -246,41 +279,141 @@ function openContainerForm(item = null) {
   });
 }
 function cancelContainer(item) {
-  const dialog = modal('Отменить запись', `<p class="muted" style="margin-bottom:18px">${esc(item.code)} будет исключён из вывоза. История сохранится.</p><form id="cancelForm" class="form"><label class="field">Причина отмены<textarea name="reason" required maxlength="300" placeholder="Например: неверный вес или контейнер повреждён"></textarea></label><div class="form-actions"><button class="btn" type="button" data-action="close-modal">Назад</button><button class="btn btn-danger" type="submit">Отменить запись</button></div></form>`);
+  const dialog = modal('Отменить заявку', `<p class="muted" style="margin-bottom:18px">${esc(item.code)} будет исключён из вывоза. Если логист уже взял заявку, он получит уведомление.</p><form id="cancelForm" class="form"><label class="field">Причина отмены<textarea name="reason" required maxlength="300" placeholder="Например: ошибочный вес или контейнер повреждён"></textarea></label><div class="form-actions"><button class="btn" type="button" data-action="close-modal">Назад</button><button class="btn btn-danger" type="submit">Отменить заявку</button></div></form>`);
   dialog.querySelector('#cancelForm').addEventListener('submit', event => {
     event.preventDefault();
     const reason = event.currentTarget.elements.reason.value.trim();
     if (!reason) return;
-    void run(async () => checked(await supabase.from('gl_containers').update({ status:'cancelled', note: `${item.note ? item.note+'\n' : ''}Отмена: ${reason}`, trip_id:null }).eq('id',item.id).eq('version',item.version).select().single()), 'Запись отменена');
+    void run(async () => checked(await supabase.from('gl_containers').update({ status:'cancelled', note: `Отмена: ${reason}`, trip_id:null }).eq('id',item.id).eq('version',item.version).select().single()), 'Заявка отменена');
   });
 }
 
 function myTrip() { return records.trips.find(t => t.driver_id === user.id && t.status === 'active'); }
 function positionFor(tripId) { return records.positions.find(x => x.trip_id === tripId); }
-function mapFor(position) {
-  if (!position) return '';
-  const lat = Number(position.latitude), lon = Number(position.longitude);
-  const bbox = [lon-.007,lat-.005,lon+.007,lat+.005].join('%2C');
-  return `<iframe class="map" title="Положение логиста" loading="lazy" src="https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${lat}%2C${lon}"></iframe>`;
+function syncGps() {
+  const trip = myTrip();
+  if (!trip) { stopGpsOnLogout(); gpsAttemptedTrip = null; return; }
+  if (watchId === null && gpsAttemptedTrip !== trip.id) {
+    gpsAttemptedTrip = trip.id;
+    void startGps(true);
+  }
 }
-function locationCard(trip, manager = false) {
-  const pos = positionFor(trip?.id);
-  const fresh = pos && Date.now() - Date.parse(pos.updated_at) < 120000;
-  return `<section class="card"><div class="card-head"><div><h2>Положение логиста</h2><p>${trip ? `${esc(trip.driver_name)} · ${esc(trip.code)}` : 'Нет активного рейса'}</p></div></div><div class="card-body location">${pos ? `<div class="coords">${number(pos.latitude,5)}, ${number(pos.longitude,5)}</div><small>${fresh?'GPS активен':'Последняя известная точка'} · точность ${number(pos.accuracy_m,0)} м · ${dateTime(pos.updated_at)}</small>${mapFor(pos)}` : `<p class="muted">${manager?'Логист ещё не включил GPS.':'Включите GPS на телефоне, чтобы команда видела положение рейса.'}</p>`}${!manager && trip ? `<div class="toolbar">${button(watchId===null?'Включить GPS':'Остановить GPS',watchId===null?'start-gps':'stop-gps','','btn-sm')}</div>` : ''}</div></section>`;
+function visibleMapTrips() {
+  if (staff.role === 'manager') return records.trips.filter(x=>x.status==='active');
+  if (staff.role === 'logistics') return records.trips.filter(x=>x.driver_id===user.id&&x.status==='active');
+  return records.trips.filter(t=>t.status==='active'&&records.containers.some(c=>c.trip_id===t.id&&c.store_id===staff.store_id&&['assigned','picked_up'].includes(c.status)));
+}
+function selectedTrip() {
+  const trips = visibleMapTrips();
+  return trips.find(x=>x.id===selectedMapTrip) || trips[0] || null;
+}
+function mapWorkspace(role) {
+  const trips = visibleMapTrips();
+  const chosen = selectedTrip();
+  const collections = chosen ? records.containers.filter(x=>x.trip_id===chosen.id&&['assigned','picked_up'].includes(x.status)) : records.containers.filter(x=>x.status==='ready'&&(role!=='barista'||x.store_id===staff.store_id));
+  const grouped = [...new Set(collections.map(x=>x.store_id))].map(id=>({store:records.stores.find(s=>s.id===id),items:collections.filter(x=>x.store_id===id)}));
+  const gps = chosen ? positionFor(chosen.id) : null;
+  const fresh = gps && ageMs(gps.updated_at)<120000;
+  const choices = trips.length>1 ? `<div class="trip-choices">${trips.map(t=>`<button class="trip-choice ${chosen?.id===t.id?'selected':''}" data-action="select-map-trip" data-id="${t.id}"><strong>${esc(t.driver_name)}</strong><span>${esc(t.code)}</span></button>`).join('')}</div>` : '';
+  const stops = grouped.map(({store,items},i)=>`<div class="map-stop"><span class="stop-number">${i+1}</span><div><strong>${esc(store?.name||items[0].store_id)}</strong><small>${esc(store?.address||'Точный адрес не указан')} · ${chosen?`${items.filter(x=>x.status==='assigned').length} к вывозу · ${items.filter(x=>x.status==='picked_up').length} забрано`:`${items.length} ${word(items.length,'заявка','заявки','заявок')}`}</small></div></div>`).join('');
+  const deliveries = role==='logistics' ? records.sales.filter(x=>x.fulfillment==='delivery'&&x.delivery_trip_id===chosen?.id&&['assigned','out_for_delivery'].includes(x.delivery_status)).map(x=>`<div class="map-stop"><span class="stop-number">↗</span><div><strong>${esc(x.customer_name)}</strong><small>${esc(x.delivery_address)}</small></div></div>`).join('') : '';
+  return `<div class="map-layout"><section class="card map-card"><div class="map-toolbar"><strong>${chosen?esc(chosen.driver_name+' · '+chosen.code):'Точки и рейсы'}</strong><span>${gps?`${fresh?'GPS сейчас':'Последний GPS'} · ${dateTime(gps.updated_at)}`:'GPS ещё не передан'}</span></div><div id="operationsMap" class="operations-map" role="img" aria-label="Карта заявок и рейсов"></div><div class="map-foot" id="routeMeta">${grouped.length?'Остановок: '+grouped.length:'Нет остановок с заявками'}</div></section><aside class="card"><div class="card-head"><h2>Маршрут</h2></div><div class="card-body">${choices}${stops||empty('Остановок нет','Заявки появятся здесь автоматически.')}${deliveries}</div></aside></div>`;
+}
+function mapPoint(lat,lon) { return Number.isFinite(Number(lat))&&Number.isFinite(Number(lon))&&lat!==null&&lon!==null ? [Number(lat),Number(lon)] : null; }
+function routeStops(trip) {
+  const ids = [...new Set(records.containers.filter(c=>c.trip_id===trip.id&&c.status==='assigned').map(c=>c.store_id))];
+  const stores=ids.map(id=>records.stores.find(s=>s.id===id)).filter(s=>s&&mapPoint(s.latitude,s.longitude));
+  const deliveries=records.sales.filter(x=>x.delivery_trip_id===trip.id&&['assigned','out_for_delivery'].includes(x.delivery_status)&&mapPoint(x.latitude,x.longitude));
+  return [...stores,...deliveries];
+}
+async function drawOperationsMap() {
+  const element = document.querySelector('#operationsMap');
+  if (!element || !staff) return;
+  const firstStore = records.stores.find(s=>s.active&&mapPoint(s.latitude,s.longitude));
+  const map = L.map(element,{zoomControl:true,scrollWheelZoom:false}).setView(firstStore ? mapPoint(firstStore.latitude,firstStore.longitude) : [42.323,69.595],12);
+  activeMap = map;
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
+  const bounds=[];
+  const role=staff.role, chosen=selectedTrip();
+  const visibleIds = role==='barista' ? [staff.store_id] : records.stores.filter(s=>s.active).map(s=>s.id);
+  for (const store of records.stores.filter(s=>visibleIds.includes(s.id))) {
+    const point=mapPoint(store.latitude,store.longitude);
+    if (!point) continue;
+    const count=records.containers.filter(c=>c.store_id===store.id&&['ready','assigned','picked_up'].includes(c.status)).length;
+    L.circleMarker(point,{radius:count?10:7,color:'#176944',fillColor:'#56a87b',fillOpacity:.9,weight:2})
+      .bindPopup(`<strong>${esc(store.name)}</strong><br>${esc(store.address||'Адрес не указан')}<br>${count} ${word(count,'заявка','заявки','заявок')}`).addTo(map);
+    bounds.push(point);
+  }
+  const trips=visibleMapTrips();
+  for(const trip of trips){
+    const pos=positionFor(trip.id),point=pos&&mapPoint(pos.latitude,pos.longitude);
+    if(!point)continue;
+    const current=ageMs(pos.updated_at)<120000;
+    L.circleMarker(point,{radius:11,color:'#fff',weight:3,fillColor:current?'#1d6cba':'#7c8a83',fillOpacity:1})
+      .bindPopup(`<strong>${esc(trip.driver_name)}</strong><br>${current?'GPS сейчас':'Последнее положение'} · ${dateTime(pos.updated_at)}<br>${esc(trip.code)}`).addTo(map);
+    bounds.push(point);
+  }
+  if(role==='logistics')for(const order of records.sales.filter(x=>x.fulfillment==='delivery'&&x.delivery_trip_id===chosen?.id&&['assigned','out_for_delivery'].includes(x.delivery_status))){
+    const point=mapPoint(order.latitude,order.longitude);if(!point)continue;
+    L.circleMarker(point,{radius:9,color:'#a56e28',fillColor:'#eab260',fillOpacity:.95,weight:2})
+      .bindPopup(`<strong>${esc(order.customer_name)}</strong><br>${esc(order.delivery_address)}`).addTo(map);bounds.push(point);
+  }
+  if(bounds.length)map.fitBounds(bounds,{padding:[36,36],maxZoom:14});
+  setTimeout(()=>{if(activeMap===map)map.invalidateSize();},100);
+  const position=chosen&&positionFor(chosen.id);
+  const start=position&&mapPoint(position.latitude,position.longitude);
+  const stops=chosen?routeStops(chosen):[];
+  if(!start||!stops.length)return;
+  const coordinates=[start,...stops.map(s=>mapPoint(s.latitude,s.longitude))];
+  const url=`https://router.project-osrm.org/route/v1/driving/${coordinates.map(([lat,lon])=>`${lon},${lat}`).join(';')}?overview=full&geometries=geojson&steps=false`;
+  try{
+    const response=await fetch(url,{signal:AbortSignal.timeout(8000)});
+    const data=await response.json();
+    if(!response.ok||data.code!=='Ok'||!data.routes?.[0])throw Error('Маршрут не найден');
+    if(activeMap!==map)return;
+    const line=L.geoJSON(data.routes[0].geometry,{style:{color:'#176944',weight:5,opacity:.8}}).addTo(map);
+    map.fitBounds(line.getBounds(),{padding:[34,34]});
+    const meta=document.querySelector('#routeMeta');
+    if(meta)meta.textContent=`По дорогам: ${number(data.routes[0].distance/1000,1)} км · около ${Math.round(data.routes[0].duration/60)} мин`;
+  }catch{
+    if(activeMap!==map)return;
+    L.polyline(coordinates,{color:'#176944',weight:3,dashArray:'7 7',opacity:.7}).addTo(map);
+    const meta=document.querySelector('#routeMeta');if(meta)meta.textContent='Показан порядок остановок; дорожный маршрут сейчас недоступен';
+  }
 }
 function renderLogistics() {
   const trip = myTrip();
   const ready = records.containers.filter(x => x.status === 'ready').sort(byNewest);
   const mine = trip ? records.containers.filter(x => x.trip_id === trip.id).sort(byNewest) : [];
   const inTransit = mine.filter(x => ['assigned','picked_up'].includes(x.status));
-  const body = `<section class="stats">${stat('Готовы к вывозу',ready.length,`${number(ready.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`)}${stat('В моём рейсе',mine.length)}${stat('Уже забрано',mine.filter(x=>['picked_up','received','batched'].includes(x.status)).length)}${stat('Рейс',trip?trip.code:'Не начат')}</section><div class="grid"><div class="stack"><section class="card"><div class="card-head"><div><h2>Мой рейс</h2><p>${trip?'Покажите ожидаемый код бариста и сканируйте этикетку при получении.':'Начните рейс, затем добавьте готовые контейнеры.'}</p></div>${trip && !inTransit.length ? button('Завершить рейс','finish-trip','','btn-sm') : ''}</div>${trip ? (mine.length?mine.map(x=>containerItem(x,'logistics')).join(''):empty('Рейс пуст','Добавьте контейнеры из очереди ниже.')):empty('Нет активного рейса','Создайте рейс, чтобы принять заказы.')}</section><section class="card"><div class="card-head"><div><h2>Готовы на точках</h2><p>Бариста уже проверил качество</p></div></div>${ready.length?ready.map(x=>containerItem(x,'logistics')).join(''):empty('Очередь пуста','Новые контейнеры появятся здесь сразу после записи.')}</section></div><aside class="stack">${locationCard(trip)}<div class="notice">Передача считается выполненной после сверки кода на контейнере. Ошибочный вывоз можно отменить до приёмки в цехе.</div></aside></div>`;
-  shell('Вывоз с точек', 'Найдите готовый контейнер, добавьте его в рейс и подтвердите получение сканированием.', !trip ? button('Начать рейс','start-trip','','btn-primary') : '', body);
+  const pendingDeliveries = trip ? records.sales.filter(x=>x.delivery_trip_id===trip.id&&['assigned','out_for_delivery'].includes(x.delivery_status)) : [];
+  const seen = new Set(JSON.parse(localStorage.getItem(`gl_seen_notices_${user.id}`) || '[]'));
+  const notices = records.notifications.filter(n => !seen.has(n.id)).sort(byNewest);
+  if (notices[0] && lastNotificationId && notices[0].id !== lastNotificationId) toast(`Заявка ${notices[0].container_code} отменена`);
+  lastNotificationId = notices[0]?.id || null;
+  const notice = notices.length ? `<div class="cancel-alert"><strong>Заявка ${esc(notices[0].container_code)} отменена</strong><span>${esc(storeName(notices[0].store_id))} · удалена из вашего рейса</span>${button('Понятно','dismiss-notice',`data-id="${notices[0].id}"`,'btn-sm')}</div>` : '';
+  const nav = tabs([['requests','Заявки'],['map','Карта'],['deliveries','Доставка'],['archive','Архив']]);
+  let body = `${notice}${nav}`;
+  if (activeTab === 'map') body += mapWorkspace('logistics');
+  else if (activeTab === 'deliveries') {
+    const queue = records.sales.filter(x=>x.fulfillment==='delivery'&&x.delivery_status==='ready').sort(byNewest);
+    const assigned = records.sales.filter(x=>x.fulfillment==='delivery'&&x.delivery_driver_id===user.id&&['assigned','out_for_delivery'].includes(x.delivery_status)).sort(byNewest);
+    body += `<div class="grid"><section class="card"><div class="card-head"><h2>Мои доставки</h2></div>${assigned.length?assigned.map(x=>productOrderItem(x,'logistics')).join(''):empty('Доставок нет','Возьмите готовую заявку из очереди.')}</section><section class="card"><div class="card-head"><h2>Готовы к отправке</h2></div>${queue.length?queue.map(x=>productOrderItem(x,'logistics')).join(''):empty('Очередь пуста','Новые заявки появятся после выпуска партии.')}</section></div>`;
+  } else if (activeTab === 'archive') {
+    const archive = records.containers.filter(x=>x.trip_id&&records.trips.some(t=>t.id===x.trip_id&&t.driver_id===user.id)&&archivedContainer(x)).sort(byNewest);
+    body += `<section class="card"><div class="card-head"><h2>Архив вывоза</h2></div>${archive.length?archive.map(x=>containerItem(x,'logistics')).join(''):empty('Архив пока пуст','Завершённые заявки переходят сюда через 24 часа.')}</section>`;
+  } else {
+    body += `<div class="shift-strip"><span><strong>${ready.length}</strong> готово к вывозу</span><span><strong>${inTransit.length}</strong> в рейсе</span><span><strong>${mine.filter(x=>x.status==='picked_up').length}</strong> забрано</span></div><div class="grid logistics-grid"><section class="card"><div class="card-head"><div><h2>Мой рейс</h2><p>${esc(trip?.code||'Рейс не начат')}</p></div>${trip && !inTransit.length && !pendingDeliveries.length ? button('Завершить рейс','finish-trip','','btn-sm') : ''}</div>${mine.length?mine.filter(x=>!archivedContainer(x)).map(x=>containerItem(x,'logistics')).join(''):empty('Рейс пуст','Добавьте заявку из очереди.')}</section><section class="card"><div class="card-head"><h2>Новые заявки</h2></div>${ready.length?ready.map(x=>containerItem(x,'logistics')).join(''):empty('Новых заявок нет','Очередь обновится автоматически.')}</section></div>`;
+  }
+  const heroAction = !trip && ['requests','deliveries'].includes(activeTab) ? button('Начать рейс','start-trip','','btn-primary') : trip && watchId===null ? button('Включить GPS','start-gps','','btn-primary') : '';
+  shell(({requests:'Вывоз заявок',map:'Карта рейса',deliveries:'Доставка продукта',archive:'История вывоза'})[activeTab], '', heroAction, body);
 }
 
-async function startGps() {
+async function startGps(automatic = false) {
   const trip = myTrip();
   if (!trip || !navigator.geolocation) return toast('GPS недоступен на этом устройстве');
   if (watchId !== null) return;
+  gpsAttemptedTrip = trip.id;
   watchId = navigator.geolocation.watchPosition(async position => {
     if (Date.now() - lastPositionAt < 10000) return;
     lastPositionAt = Date.now();
@@ -289,13 +422,50 @@ async function startGps() {
       longitude: position.coords.longitude, accuracy_m: position.coords.accuracy,
     }, { onConflict: 'trip_id' });
     if (result.error) toast(`GPS не сохранён: ${result.error.message}`);
-  }, error => toast(`GPS: ${error.message}`), { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
-  render(); toast('Передача GPS включена');
+  }, error => { watchId = null; toast(`GPS: ${error.message}`); render(); }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
+  if (!automatic) toast('GPS включён');
 }
-function stopGps() { if (watchId !== null) navigator.geolocation.clearWatch(watchId); watchId = null; render(); toast('Передача GPS остановлена'); }
+function stopGps() { if (watchId !== null) navigator.geolocation.clearWatch(watchId); watchId = null; render(); toast('GPS остановлен'); }
+
+function productOrderItem(order, role) {
+  const legacy = !order.customer_name;
+  let actions = '';
+  if (role === 'logistics' && order.fulfillment === 'delivery') {
+    if (order.delivery_status === 'ready') actions = myTrip() ? button('Взять доставку','claim-delivery',`data-id="${order.id}"`,'btn-sm btn-primary') : '<span class="muted">Начните рейс, чтобы взять доставку</span>';
+    if (order.delivery_driver_id === user.id && order.delivery_status === 'assigned') actions = `${button('Сканировать выдачу','scan-product',`data-id="${order.id}"`,'btn-sm btn-primary')}${button('Вернуть в очередь','release-delivery',`data-id="${order.id}"`,'btn-sm')}`;
+    if (order.delivery_driver_id === user.id && order.delivery_status === 'out_for_delivery') actions = button('Передать покупателю','complete-delivery',`data-id="${order.id}"`,'btn-sm btn-primary');
+  }
+  if (role === 'production' && order.fulfillment === 'delivery' && ['ready','assigned'].includes(order.delivery_status)) actions = button('Показать QR','product-qr',`data-id="${order.id}"`,'btn-sm');
+  if (role === 'manager') {
+    if (order.delivery_status === 'ready' && order.fulfillment === 'pickup') actions = button('Подтвердить самовывоз','complete-pickup',`data-id="${order.id}"`,'btn-sm btn-primary');
+    if (order.delivery_status === 'ready') actions += button('Отменить','cancel-product-order',`data-id="${order.id}"`,'btn-sm btn-danger');
+  }
+  return `<article class="item"><div class="item-top"><div><div class="item-title mono">${esc(order.order_code||'Продажа')} · ${esc(order.customer_name||order.channel)}</div><div class="item-sub">${esc(records.batches.find(b=>b.id===order.batch_id)?.code||'Партия')} · ${order.packs} уп. · ${money(order.unit_price)}</div></div>${badge(order.delivery_status)}</div><div class="item-meta"><span>${order.fulfillment==='delivery'?'Доставка':'Самовывоз'}</span>${order.delivery_address?`<span>${esc(order.delivery_address)}</span>`:''}${order.delivery_driver_name?`<span>${esc(order.delivery_driver_name)}</span>`:''}${order.recipient_name?`<span>Получил: ${esc(order.recipient_name)}</span>`:''}<span>${dateTime(order.created_at)}</span></div>${legacy?'':actions?`<div class="item-actions">${actions}</div>`:''}</article>`;
+}
+async function productQrDialog(order) {
+  const image = await QRCode.toDataURL(order.order_code, { width: 320, margin: 1, color: { dark: '#17271d', light: '#ffffff' } });
+  modal('Выдача продукта',`<img class="qr-image" src="${image}" alt="QR-код ${esc(order.order_code)}"><div class="qr-code">${esc(order.order_code)}</div><p class="muted" style="text-align:center">Логист сканирует код при получении партии.</p><div class="form-actions"><button class="btn" data-action="print-code">Печать</button><button class="btn btn-primary" data-action="close-modal">Закрыть</button></div>`);
+}
+async function productScanDialog(order) {
+  const dialog=modal('Получить продукт',`<div class="notice">${esc(order.order_code)} · ${esc(order.customer_name)} · ${order.packs} уп.</div><video class="scan-video" id="scanVideo" autoplay muted playsinline></video><p class="scan-hint" id="scanHint">Сканируйте код на партии или введите его с этикетки.</p><form id="scanProductForm" class="form"><label class="field">Код выдачи<input name="code" class="scan-input mono" required autocomplete="off"></label><div class="form-actions"><button class="btn" data-action="close-modal" type="button">Отмена</button><button class="btn btn-primary" type="submit">Подтвердить выдачу</button></div></form>`);
+  let controls;
+  dialog.addEventListener('close',()=>controls?.stop(),{once:true});
+  const form=dialog.querySelector('#scanProductForm');
+  const submit=code=>{const normalized=String(code||'').trim().toUpperCase();if(normalized!==order.order_code)return toast('Код не совпадает');void run(async()=>checked(await supabase.from('gl_sales').update({delivery_status:'out_for_delivery',pickup_code:normalized}).eq('id',order.id).eq('delivery_status','assigned').select().single()),'Продукт получен');};
+  form.addEventListener('submit',event=>{event.preventDefault();submit(form.elements.code.value);});
+  try{
+    if(!navigator.mediaDevices?.getUserMedia)throw Error('Нет камеры');
+    const reader=new BrowserQRCodeReader();
+    controls=await reader.decodeFromVideoDevice(undefined,dialog.querySelector('#scanVideo'),result=>{if(!result)return;const code=result.getText().trim().toUpperCase();form.elements.code.value=code;if(code===order.order_code){controls?.stop();submit(code);}else dialog.querySelector('#scanHint').textContent=`Считан ${code}. Это другая заявка.`;});
+  }catch{dialog.querySelector('#scanHint').textContent='Камера недоступна. Введите код с этикетки.';}
+}
+function productHandoverDialog(order, pickup=false) {
+  const dialog=modal(pickup?'Подтвердить самовывоз':'Передать покупателю',`<form id="productHandoverForm" class="form"><div class="notice">${esc(order.order_code)} · ${esc(order.customer_name)} · ${order.packs} уп.</div><label class="field">Кто получил продукт<input name="recipient" required minlength="2" maxlength="100" autocomplete="name"></label><div class="form-actions"><button class="btn" type="button" data-action="close-modal">Отмена</button><button class="btn btn-primary" type="submit">Передано</button></div></form>`);
+  dialog.querySelector('#productHandoverForm').addEventListener('submit',event=>{event.preventDefault();const recipient=event.currentTarget.elements.recipient.value.trim();if(recipient.length<2)return;void run(async()=>checked(await supabase.from('gl_sales').update({delivery_status:'delivered',recipient_name:recipient}).eq('id',order.id).eq('delivery_status',pickup?'ready':'out_for_delivery').select().single()),'Передача подтверждена');});
+}
 
 function batchItem(batch) {
-  const sold = records.sales.filter(x => x.batch_id === batch.id).reduce((s,x)=>s+x.packs,0);
+  const sold = records.sales.filter(x => x.batch_id === batch.id && x.delivery_status !== 'cancelled').reduce((s,x)=>s+x.packs,0);
   const available = batch.produced_packs - sold;
   let actions = '';
   if (batch.created_by === user.id && staff.role === 'production') {
@@ -309,11 +479,20 @@ function renderProduction() {
   const incoming = records.containers.filter(x => x.status === 'picked_up').sort(byNewest);
   const received = records.containers.filter(x => x.status === 'received').sort(byNewest);
   const batches = [...records.batches].sort(byNewest);
-  const body = `<section class="stats">${stat('Ожидают приёмки',incoming.length)}${stat('Принято без партии',received.length,`${number(received.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`)}${stat('Партий в работе',batches.filter(x=>x.status!=='complete').length)}${stat('Готово упаковок',batches.reduce((s,x)=>s+x.produced_packs,0))}</section><div class="grid"><div class="stack"><section class="card"><div class="card-head"><div><h2>Приёмка</h2><p>Сверьте QR на контейнере с записью логиста</p></div></div>${incoming.length?incoming.map(x=>containerItem(x,'production')).join(''):empty('Ожидающих контейнеров нет','Они появятся после подтверждения вывоза логистом.')}</section><section class="card"><div class="card-head"><div><h2>Принято без партии</h2><p>Контейнеры можно объединить в производственную партию</p></div>${received.length?button('Создать партию','new-batch','','btn-sm btn-primary'):''}</div>${received.length?received.map(x=>containerItem(x,'production')).join(''):empty('Все принятые контейнеры распределены','Новая партия создаётся только из прошедших приёмку.')}</section><section class="card"><div class="card-head"><h2>Партии</h2></div>${batches.length?batches.map(batchItem).join(''):empty('Партий пока нет','Создайте партию из принятых контейнеров.')}</section></div><aside class="stack"><div class="notice">Сканирование подтверждает, что в цех приехал именно тот контейнер, который логист забрал на точке.</div><section class="card"><div class="card-head"><h2>Этапы партии</h2></div><div class="card-body step-list"><div class="step"><span class="step-num">01</span><div><strong>Приёмка</strong><small>Скан кода и фактический мокрый вес</small></div></div><div class="step"><span class="step-num">02</span><div><strong>Сушка и контроль</strong><small>Ввод сухого и пригодного веса</small></div></div><div class="step"><span class="step-num">03</span><div><strong>Выпуск</strong><small>Фактическое число упаковок</small></div></div></div></section></aside></div>`;
-  shell('Производство', 'Примите контейнер по коду, затем фиксируйте фактический выход партии.', '', body);
+  const eligible=received.filter(x=>records.trips.find(t=>t.id===x.trip_id)?.status==='completed');
+  let body=tabs([['intake','Приёмка'],['batches','Партии'],['dispatch','Выдача'],['archive','Архив']]);
+  if(activeTab==='batches')body+=`<section class="stats compact-stats">${stat('В работе',batches.filter(x=>x.status!=='complete').length)}${stat('Готово упаковок',batches.reduce((s,x)=>s+x.produced_packs,0))}${stat('Принято сырья',`${number(batches.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`)}</section><section class="card"><div class="card-head"><h2>Партии</h2></div>${batches.filter(x=>x.status!=='complete'||ageMs(x.created_at)<86400000).length?batches.filter(x=>x.status!=='complete'||ageMs(x.created_at)<86400000).map(batchItem).join(''):empty('Партий пока нет','Принятые контейнеры появятся после закрытия рейса.')}</section>`;
+  else if(activeTab==='dispatch'){
+    const orders=records.sales.filter(x=>x.fulfillment==='delivery'&&['ready','assigned'].includes(x.delivery_status)).sort(byNewest);
+    body+=`<section class="card"><div class="card-head"><h2>Выдача логисту</h2></div>${orders.length?orders.map(x=>productOrderItem(x,'production')).join(''):empty('Выдач нет','После оформления доставки появится код выдачи.')}</section>`;
+  }else if(activeTab==='archive'){
+    const old=batches.filter(x=>x.status==='complete'&&ageMs(x.created_at)>=86400000);
+    body+=`<section class="card"><div class="card-head"><h2>Архив партий</h2></div>${old.length?old.map(batchItem).join(''):empty('Архив пока пуст','Завершённые партии переходят сюда через 24 часа.')}</section>`;
+  }else body+=`<section class="stats compact-stats">${stat('Ожидают приёмки',incoming.length)}${stat('Принято',received.length,`${number(received.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`)}${stat('Готово к партии',eligible.length)}</section><div class="grid"><section class="card"><div class="card-head"><h2>Ожидают приёмки</h2></div>${incoming.length?incoming.map(x=>containerItem(x,'production')).join(''):empty('Контейнеров нет','Очередь обновится автоматически.')}</section><section class="card"><div class="card-head"><h2>Принято в цех</h2>${eligible.length?button('Создать партию','new-batch','','btn-sm btn-primary'):''}</div>${received.length?received.map(x=>`<div class="production-intake">${containerItem(x,'production')}${records.trips.find(t=>t.id===x.trip_id)?.status==='completed'?'':`<small>Рейс ещё открыт · партия доступна после его закрытия</small>`}</div>`).join(''):empty('Принятых контейнеров нет','Сканируйте первый контейнер.')}</section></div>`;
+  shell(({intake:'Приёмка контейнеров',batches:'Производственные партии',dispatch:'Выдача продукта',archive:'История партий'})[activeTab], '', '', body);
 }
 function newBatchDialog() {
-  const received = records.containers.filter(x=>x.status==='received').sort(byNewest);
+  const received = records.containers.filter(x=>x.status==='received'&&records.trips.find(t=>t.id===x.trip_id)?.status==='completed').sort(byNewest);
   if (!received.length) return toast('Нет контейнеров для партии');
   const dialog = modal('Создать партию', `<form id="batchForm" class="form"><p class="muted">Выберите контейнеры, которые физически переданы в производство.</p>${received.map(x=>`<label class="checkrow"><input type="checkbox" name="container" value="${x.id}" checked><span><strong class="mono">${esc(x.code)}</strong> · ${esc(storeName(x.store_id))} · ${number(x.wet_kg)} кг</span></label>`).join('')}<div class="form-actions"><button class="btn" type="button" data-action="close-modal">Отмена</button><button class="btn btn-primary" type="submit">Сформировать партию</button></div></form>`);
   dialog.querySelector('#batchForm').addEventListener('submit', event=>{
@@ -336,31 +515,40 @@ function stageDialog(batch, stage) {
 
 function managerTabs() {
   const items = staff.can_manage_access
-    ? [['overview','Сводка'],['staff','Команда'],['stores','Точки'],['sales','Продажи']]
-    : [['overview','Сводка'],['sales','Продажи']];
-  return `<nav class="tabs" aria-label="Разделы управления">${items.map(([id,label])=>`<button class="tab ${activeTab===id?'active':''}" data-action="tab" data-id="${id}">${label}</button>`).join('')}</nav>`;
+    ? [['overview','Обзор'],['map','Карта'],['sales','Заказы продукта'],['journal','Журнал'],['staff','Команда'],['stores','Точки']]
+    : [['overview','Обзор'],['map','Карта'],['sales','Заказы продукта'],['journal','Журнал']];
+  return tabs(items);
 }
 function renderManagement() {
   if (!staff.can_manage_access && ['staff','stores'].includes(activeTab)) activeTab = 'overview';
   const activeContainers=records.containers.filter(x=>!['cancelled','rejected'].includes(x.status));
   const produced=records.batches.reduce((s,x)=>s+x.produced_packs,0);
-  const sold=records.sales.reduce((s,x)=>s+x.packs,0);
-  const revenue=records.sales.reduce((s,x)=>s+x.packs*Number(x.unit_price),0);
+  const sold=records.sales.filter(x=>x.delivery_status==='delivered').reduce((s,x)=>s+x.packs,0);
+  const reserved=records.sales.filter(x=>x.delivery_status!=='cancelled').reduce((s,x)=>s+x.packs,0);
+  const revenue=records.sales.filter(x=>x.delivery_status==='delivered').reduce((s,x)=>s+x.packs*Number(x.unit_price),0);
   let body = managerTabs();
   if (activeTab==='overview') {
     const liveTrip=records.trips.filter(x=>x.status==='active');
-    body += `<section class="stats">${stat('Контейнеров',activeContainers.length,`${number(activeContainers.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`)}${stat('В пути',records.containers.filter(x=>['assigned','picked_up'].includes(x.status)).length)}${stat('Выпущено',`${produced} уп.`)}${stat('Выручка',money(revenue),`${sold} уп. продано`)}</section><div class="grid"><div class="stack"><section class="card"><div class="card-head"><div><h2>Поток материала</h2><p>По фактическим операциям команды</p></div></div><div class="card-body split-values"><div><span>Готово на точках</span><strong>${records.containers.filter(x=>x.status==='ready').length}</strong></div><div><span>У логиста</span><strong>${records.containers.filter(x=>['assigned','picked_up'].includes(x.status)).length}</strong></div><div><span>Принято в цех</span><strong>${records.containers.filter(x=>['received','batched'].includes(x.status)).length}</strong></div><div><span>Остаток упаковок</span><strong>${produced-sold}</strong></div></div></section><section class="card"><div class="card-head"><h2>Последние действия</h2></div>${[...records.events].sort(byNewest).slice(0,18).map(e=>`<div class="item"><div class="item-top"><div><div class="item-title">${esc(eventLabel(e.action,e.entity))}</div><div class="item-sub">${esc(e.actor_email||'Система')} · ${dateTime(e.created_at)}</div></div><span class="mono muted">${esc(e.details?.code||records.containers.find(x=>x.id===e.entity_id)?.code||records.trips.find(x=>x.id===e.entity_id)?.code||records.batches.find(x=>x.id===e.entity_id)?.code||'')}</span></div></div>`).join('')||empty('История пуста','Действия сотрудников появятся здесь.')}</section></div><aside class="stack">${liveTrip.length?liveTrip.map(x=>locationCard(x,true)).join(''):locationCard(null,true)}<div class="notice">Экономика здесь основана на зарегистрированных продажах. Расходы и прибыль появятся после ввода фактических затрат.</div></aside></div>`;
+    body += `<section class="stats">${stat('Сырьё в системе',`${number(activeContainers.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`,`${activeContainers.length} контейнеров`)}${stat('В пути',records.containers.filter(x=>['assigned','picked_up'].includes(x.status)).length)}${stat('Произведено',`${produced} уп.`)}${stat('Выручка',money(revenue),`${sold} уп. передано`)}</section><div class="overview-grid"><section class="card"><div class="card-head"><h2>Работа сегодня</h2></div><div class="flow-list"><div><span>Готово на точках</span><strong>${records.containers.filter(x=>x.status==='ready').length}</strong></div><div><span>Рейсы в работе</span><strong>${liveTrip.length}</strong></div><div><span>Ожидает приёмки</span><strong>${records.containers.filter(x=>x.status==='picked_up').length}</strong></div><div><span>Партии в производстве</span><strong>${records.batches.filter(x=>x.status!=='complete').length}</strong></div><div><span>Заказы продукта</span><strong>${records.sales.filter(x=>!['delivered','cancelled'].includes(x.delivery_status)).length}</strong></div></div></section><section class="card"><div class="card-head"><h2>Активные рейсы</h2>${button('Открыть карту','tab',`data-id="map"`,'btn-sm')}</div>${liveTrip.length?liveTrip.map(t=>`<div class="item"><div class="item-title">${esc(t.driver_name)}</div><div class="item-sub mono">${esc(t.code)} · ${records.containers.filter(c=>c.trip_id===t.id&&['assigned','picked_up'].includes(c.status)).length} заявок</div><div class="item-sub">${positionFor(t.id)?`GPS · ${dateTime(positionFor(t.id).updated_at)}`:'GPS не передан'}</div></div>`).join(''):empty('Рейсов нет','Новые рейсы появятся здесь.')}</section></div>`;
+  } else if (activeTab==='map') {
+    body += mapWorkspace('manager');
+  } else if (activeTab==='journal') {
+    const allEvents=[...records.events].sort(byNewest);
+    const events=journalFilter==='cancelled'?allEvents.filter(e=>e.entity==='gl_containers'&&e.action==='cancelled'):allEvents;
+    body += `<section class="card"><div class="card-head"><h2>Журнал операций</h2><div class="journal-filters"><button class="tab ${journalFilter==='all'?'active':''}" data-action="journal-filter" data-id="all">Все</button><button class="tab ${journalFilter==='cancelled'?'active':''}" data-action="journal-filter" data-id="cancelled">Отмены</button></div></div>${events.length?events.slice(0,150).map(e=>`<div class="item"><div class="item-top"><div><div class="item-title">${esc(eventLabel(e.action,e.entity))}</div><div class="item-sub">${esc(e.actor_email||'Система')} · ${dateTime(e.created_at)}</div>${e.entity==='gl_containers'&&e.action==='cancelled'?`<div class="item-note">${esc(e.details?.after?.note||'Причина не указана')}</div>`:''}</div><span class="mono muted">${esc(e.details?.code||records.containers.find(x=>x.id===e.entity_id)?.code||records.trips.find(x=>x.id===e.entity_id)?.code||records.batches.find(x=>x.id===e.entity_id)?.code||'')}</span></div></div>`).join(''):empty('Записей нет','События появятся здесь.')}</section>`;
   } else if (activeTab==='staff') {
     body += `<div class="grid"><section class="card"><div class="card-head"><div><h2>Сотрудники</h2><p>Роль и точка определяют доступные действия</p></div></div>${[...records.staff].sort((a,b)=>a.full_name.localeCompare(b.full_name,'ru')).map(s=>`<div class="item"><div class="item-top"><div><div class="item-title">${esc(s.full_name)}</div><div class="item-sub">${esc(s.email)} · ${esc(pageNames[s.role])}${s.store_id?` · ${esc(storeName(s.store_id))}`:''}</div></div>${s.active?'<span class="badge">Активен</span>':'<span class="badge neutral">Отключён</span>'}</div><div class="item-actions">${button('Изменить','edit-staff',`data-id="${esc(s.email)}"`,'btn-sm')}</div></div>`).join('')||empty('Команда пуста','Пригласите первого сотрудника.')}</section><aside class="stack"><section class="card"><div class="card-head"><h2>Пригласить сотрудника</h2></div><div class="card-body"><form id="staffForm" class="form"><label class="field">Рабочая почта<input name="email" type="email" required autocomplete="off"></label><label class="field">Имя и фамилия<input name="full_name" required minlength="2" maxlength="100"></label><label class="field">Роль<select name="role"><option value="barista">Бариста</option><option value="logistics">Логистика</option><option value="production">Производство</option><option value="manager">Управление</option></select></label><label class="field">Точка бариста<select name="store_id"><option value="">Выберите точку</option>${records.stores.filter(x=>x.active).map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('')}</select></label><button class="btn btn-primary" type="submit">Отправить приглашение</button></form></div></section><div class="notice">Только администратор приглашает сотрудников. После подтверждения почты сотрудник задаёт собственный пароль.</div></aside></div>`;
   } else if (activeTab==='stores') {
     body += `<div class="grid"><section class="card"><div class="card-head"><div><h2>Точки сбора</h2><p>Адреса вывоза и назначение бариста</p></div></div>${[...records.stores].sort((a,b)=>a.name.localeCompare(b.name,'ru')).map(s=>`<div class="item"><div class="item-top"><div><div class="item-title">${esc(s.name)}</div><div class="item-sub">${esc(s.address||'Адрес вывоза не указан')}${s.district?` · ${esc(s.district)}`:''}</div></div>${s.active?'<span class="badge">Активна</span>':'<span class="badge neutral">Отключена</span>'}</div><div class="item-actions">${button('Изменить','edit-store',`data-id="${esc(s.id)}"`,'btn-sm')}</div></div>`).join('')||empty('Точек пока нет','Добавьте первую точку.')}</section><aside class="stack"><section class="card"><div class="card-head"><h2>Добавить точку</h2></div><div class="card-body"><form id="storeForm" class="form"><label class="field">Название точки<input name="name" required maxlength="120" placeholder="Global Coffee — название"></label><label class="field">Адрес вывоза<input name="address" required maxlength="200" placeholder="Город, улица, дом"></label><label class="field">Район<input name="district" maxlength="160"></label><button class="btn btn-primary" type="submit">Добавить точку</button></form></div></section></aside></div>`;
-  } else {
-    const available=records.batches.filter(b=>b.status==='complete'&&b.produced_packs-records.sales.filter(s=>s.batch_id===b.id).reduce((sum,s)=>sum+s.packs,0)>0);
-    body += `<section class="stats">${stat('Произведено',`${produced} уп.`)}${stat('Продано',`${sold} уп.`)}${stat('Остаток',`${produced-sold} уп.`)}${stat('Выручка',money(revenue))}</section><div class="grid"><section class="card"><div class="card-head"><div><h2>Операции продаж</h2><p>Партия, количество и выручка</p></div></div>${[...records.sales].sort(byNewest).map(s=>`<div class="item"><div class="item-top"><div><div class="item-title mono">${esc(records.batches.find(b=>b.id===s.batch_id)?.code||s.batch_id)}</div><div class="item-sub">${esc(s.channel)} · ${dateTime(s.created_at)}</div></div><strong>${money(s.packs*Number(s.unit_price))}</strong></div><div class="item-meta"><span>${s.packs} уп.</span><span>${money(s.unit_price)} за упаковку</span></div></div>`).join('')||empty('Продаж ещё нет','Зафиксируйте первую выдачу готового продукта.')}</section><aside class="stack"><section class="card"><div class="card-head"><h2>Новая продажа</h2></div><div class="card-body"><form id="saleForm" class="form"><label class="field">Партия<select name="batch_id" required>${available.map(b=>`<option value="${b.id}">${esc(b.code)} · ${b.produced_packs-records.sales.filter(s=>s.batch_id===b.id).reduce((sum,s)=>sum+s.packs,0)} уп.</option>`).join('')}</select></label><label class="field">Упаковок<input name="packs" type="number" min="1" step="1" inputmode="numeric" required></label><label class="field">Цена за упаковку, ₸<input name="unit_price" type="number" min="0" step="1" inputmode="numeric" required></label><label class="field">Канал<select name="channel"><option>Кофейня</option><option>Партнёрская точка</option><option>Прямой заказ</option></select></label><button class="btn btn-primary" type="submit" ${available.length?'':'disabled'}>Зафиксировать продажу</button></form></div></section></aside></div>`;
+  } else if (activeTab==='sales') {
+    const available=records.batches.filter(b=>b.status==='complete'&&b.produced_packs-records.sales.filter(s=>s.batch_id===b.id&&s.delivery_status!=='cancelled').reduce((sum,s)=>sum+s.packs,0)>0);
+    const current=records.sales.filter(x=>!['delivered','cancelled'].includes(x.delivery_status)).sort(byNewest);
+    const history=records.sales.filter(x=>['delivered','cancelled'].includes(x.delivery_status)).sort(byNewest);
+    body += `<section class="stats compact-stats">${stat('Готово',`${produced} уп.`)}${stat('Зарезервировано',`${reserved-sold} уп.`)}${stat('Передано',`${sold} уп.`)}${stat('Выручка',money(revenue))}</section><div class="grid"><section class="card"><div class="card-head"><h2>Заявки на продукт</h2></div>${current.length?current.map(x=>productOrderItem(x,'manager')).join(''):empty('Активных заявок нет','Создайте заявку из готовой партии.')}<div class="card-head"><h2>История передач</h2></div>${history.length?history.slice(0,25).map(x=>productOrderItem(x,'manager')).join(''):empty('Передач пока нет','Подтверждённые передачи появятся здесь.')}</section><aside class="card"><div class="card-head"><h2>Новая заявка</h2></div><div class="card-body"><form id="saleForm" class="form"><label class="field">Покупатель<input name="customer_name" required minlength="2" maxlength="120" placeholder="Компания или имя"></label><label class="field">Готовая партия<select name="batch_id" required>${available.map(b=>`<option value="${b.id}">${esc(b.code)} · ${b.produced_packs-records.sales.filter(s=>s.batch_id===b.id&&s.delivery_status!=='cancelled').reduce((sum,s)=>sum+s.packs,0)} уп.</option>`).join('')}</select></label><label class="field">Упаковок<input name="packs" type="number" min="1" step="1" inputmode="numeric" required></label><label class="field">Цена за упаковку, ₸<input name="unit_price" type="number" min="0" step="1" inputmode="numeric" required></label><label class="field">Передача<select name="fulfillment"><option value="pickup">Самовывоз</option><option value="delivery">Доставка логистом</option></select></label><label class="field">Адрес доставки<input name="delivery_address" maxlength="200" placeholder="Город, улица, дом"></label><input type="hidden" name="latitude"><input type="hidden" name="longitude"><button class="btn" type="button" data-action="delivery-pin">Указать точку доставки на карте</button><label class="field">Канал<select name="channel"><option>Кофейня</option><option>Партнёрская точка</option><option>Прямой заказ</option></select></label><button class="btn btn-primary" type="submit" ${available.length?'':'disabled'}>Создать заявку</button></form></div></aside></div>`;
   }
-  shell('Управление', staff.can_manage_access ? 'Результаты работы команды, доступ сотрудников и точки сбора.' : 'Поток материала, рейсы, производство и продажи в одной сводке.', '', body);
+  shell(({overview:'Операционный обзор',map:'Карта рейсов',sales:'Заказы продукта',journal:'Журнал операций',staff:'Команда',stores:'Точки сбора'})[activeTab], '', '', body);
 }
-function eventLabel(action, entity) { const subject=({gl_containers:'Контейнер',gl_trips:'Рейс',gl_batches:'Партия',gl_sales:'Продажа'})[entity]||'Операция'; return `${subject}: ${({created:'создано',updated:'исправлено',ready:'готово к вывозу',hold:'удержано',rejected:'отклонено',cancelled:'отменено',assigned:'добавлено в рейс',picked_up:'вывоз подтверждён',received:'принято в цех',batched:'включено в партию',drying:'сушка начата',production:'вес подтверждён',complete:'выпуск завершён'})[action]||action}`; }
+function eventLabel(action, entity) { const subject=({gl_containers:'Заявка',gl_trips:'Рейс',gl_batches:'Партия',gl_sales:'Продукт'})[entity]||'Операция'; return `${subject}: ${({created:'создано',updated:'исправлено',ready:'готово',hold:'удержано',rejected:'отклонено',cancelled:'отменено',assigned:'назначено',picked_up:'вывоз подтверждён',received:'принято в цех',batched:'включено в партию',drying:'сушка начата',production:'вес подтверждён',complete:'выпуск завершён',completed:'завершён',out_for_delivery:'в доставке',delivered:'передано покупателю'})[action]||action}`; }
 function render() { if (!staff) return; if (staff.role==='barista') renderBarista(); else if (staff.role==='logistics') renderLogistics(); else if (staff.role==='production') renderProduction(); else renderManagement(); }
 
 function staffEditDialog(member) {
@@ -372,10 +560,56 @@ function staffEditDialog(member) {
   });
 }
 function storeEditDialog(store) {
-  const dialog=modal('Изменить точку',`<form id="editStoreForm" class="form"><label class="field">Название точки<input name="name" required maxlength="120" value="${esc(store.name)}"></label><label class="field">Адрес вывоза<input name="address" required maxlength="200" value="${esc(store.address||'')}"></label><label class="field">Район<input name="district" maxlength="160" value="${esc(store.district||'')}"></label><label class="checkrow"><input name="active" type="checkbox" ${store.active?'checked':''}><span>Точка активна</span></label><div class="form-actions"><button class="btn" type="button" data-action="close-modal">Отмена</button><button class="btn btn-primary" type="submit">Сохранить</button></div></form>`);
+  const dialog=modal('Изменить точку',`<form id="editStoreForm" class="form"><label class="field">Название точки<input name="name" required maxlength="120" value="${esc(store.name)}"></label><label class="field">Адрес вывоза<input name="address" required maxlength="200" value="${esc(store.address||'')}"></label><label class="field">Район<input name="district" maxlength="160" value="${esc(store.district||'')}"></label><div class="field"><span>Точка на карте</span><div id="storePickMap" class="store-pick-map"></div><small>Нажмите на место входа в кофейню</small></div><input name="latitude" type="hidden" value="${esc(store.latitude??'')}"><input name="longitude" type="hidden" value="${esc(store.longitude??'')}"><label class="checkrow"><input name="active" type="checkbox" ${store.active?'checked':''}><span>Точка активна</span></label><div class="form-actions"><button class="btn" type="button" data-action="close-modal">Отмена</button><button class="btn btn-primary" type="submit">Сохранить</button></div></form>`);
+  mountStorePicker(dialog,store.latitude,store.longitude);
   dialog.querySelector('#editStoreForm').addEventListener('submit',event=>{
     event.preventDefault();const f=event.currentTarget;
-    void run(async()=>checked(await supabase.from('gl_stores').update({name:f.elements.name.value.trim(),address:f.elements.address.value.trim(),district:f.elements.district.value.trim(),active:f.elements.active.checked}).eq('id',store.id).select().single()),'Точка обновлена');
+    void run(async()=>checked(await supabase.from('gl_stores').update({name:f.elements.name.value.trim(),address:f.elements.address.value.trim(),district:f.elements.district.value.trim(),latitude:f.elements.latitude.value?Number(f.elements.latitude.value):null,longitude:f.elements.longitude.value?Number(f.elements.longitude.value):null,active:f.elements.active.checked}).eq('id',store.id).select().single()),'Точка обновлена');
+  });
+}
+function mountStorePicker(dialog,latitude,longitude) {
+  requestAnimationFrame(()=>{
+    if(!dialog.open)return;
+    const point=mapPoint(latitude,longitude);
+    const map=L.map(dialog.querySelector('#storePickMap'),{scrollWheelZoom:false}).setView(point||[42.323,69.595],point?16:12);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
+    let pin=point?L.circleMarker(point,{radius:9,color:'#176944',fillColor:'#56a87b',fillOpacity:1}).addTo(map):null;
+    map.on('click',event=>{
+      const {lat,lng}=event.latlng;
+      dialog.querySelector('[name=latitude]').value=lat.toFixed(7);
+      dialog.querySelector('[name=longitude]').value=lng.toFixed(7);
+      if(pin)pin.setLatLng([lat,lng]);else pin=L.circleMarker([lat,lng],{radius:9,color:'#176944',fillColor:'#56a87b',fillOpacity:1}).addTo(map);
+    });
+    setTimeout(()=>map.invalidateSize(),100);
+    dialog.addEventListener('close',()=>map.remove(),{once:true});
+  });
+}
+function deliveryPinDialog() {
+  const form=document.querySelector('#saleForm');
+  if(!form)return;
+  const current=mapPoint(form.elements.latitude.value||null,form.elements.longitude.value||null);
+  const dialog=modal('Точка доставки',`<div id="deliveryPickMap" class="store-pick-map"></div><p class="scan-hint">Отметьте вход или место передачи товара на карте.</p><div class="form-actions"><button class="btn" type="button" data-action="close-modal">Отмена</button><button class="btn btn-primary" id="saveDeliveryPin" type="button" disabled>Сохранить точку</button></div>`);
+  requestAnimationFrame(()=>{
+    if(!dialog.open)return;
+    const map=L.map(dialog.querySelector('#deliveryPickMap'),{scrollWheelZoom:false}).setView(current||[42.323,69.595],current?16:12);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
+    let point=current;
+    let pin=point?L.circleMarker(point,{radius:9,color:'#176944',fillColor:'#56a87b',fillOpacity:1}).addTo(map):null;
+    if(point)dialog.querySelector('#saveDeliveryPin').disabled=false;
+    map.on('click',event=>{
+      point=[event.latlng.lat,event.latlng.lng];
+      if(pin)pin.setLatLng(point);else pin=L.circleMarker(point,{radius:9,color:'#176944',fillColor:'#56a87b',fillOpacity:1}).addTo(map);
+      dialog.querySelector('#saveDeliveryPin').disabled=false;
+    });
+    dialog.querySelector('#saveDeliveryPin').addEventListener('click',()=>{
+      if(!point)return;
+      form.elements.latitude.value=point[0].toFixed(7);
+      form.elements.longitude.value=point[1].toFixed(7);
+      form.querySelector('[data-action=delivery-pin]').textContent='Точка доставки отмечена';
+      closeModal();
+    });
+    setTimeout(()=>map.invalidateSize(),100);
+    dialog.addEventListener('close',()=>map.remove(),{once:true});
   });
 }
 async function action(event) {
@@ -388,10 +622,22 @@ async function action(event) {
   if (name==='password-login') return loginScreen();
   if (name==='logout') { stopGpsOnLogout(); await supabase.auth.signOut(); location.replace(link('index.html')); return; }
   if (!staff) return;
-  if (name==='tab'&&staff.role==='manager'&&(staff.can_manage_access||!['staff','stores'].includes(id))) {activeTab=id;render();return;}
+  if (name==='delivery-pin' && staff.role==='manager') return deliveryPinDialog();
+  if (name==='journal-filter' && staff.role==='manager' && ['all','cancelled'].includes(id)) { journalFilter=id; render(); return; }
+  if (name==='tab') {
+    const allowed={barista:['requests','map','archive'],logistics:['requests','map','deliveries','archive'],production:['intake','batches','dispatch','archive'],manager:['overview','map','sales','journal','staff','stores']}[staff.role];
+    if(allowed.includes(id)&&(staff.role!=='manager'||staff.can_manage_access||!['staff','stores'].includes(id))){activeTab=id;render();}
+    return;
+  }
+  if(name==='select-map-trip'){selectedMapTrip=id;render();return;}
+  if(name==='dismiss-notice'&&staff.role==='logistics'){
+    const key=`gl_seen_notices_${user.id}`,seen=new Set(JSON.parse(localStorage.getItem(key)||'[]'));
+    seen.add(id);localStorage.setItem(key,JSON.stringify([...seen].slice(-100)));render();return;
+  }
   if (name==='print-code') { window.print(); return; }
   const item=records.containers.find(x=>x.id===id);
   const batch=records.batches.find(x=>x.id===id);
+  const order=records.sales.find(x=>x.id===id);
   if (staff.role==='barista') {
     if (name==='new-container') return openContainerForm();
     if (name==='qr'&&item) return void qrDialog(item);
@@ -400,13 +646,17 @@ async function action(event) {
   }
   if (staff.role==='logistics') {
     if (name==='start-trip') return void run(async()=>checked(await supabase.from('gl_trips').insert({}).select().single()),'Рейс начат');
-    if (name==='finish-trip') {const trip=myTrip();if(!trip)return;stopGpsOnLogout();return void run(async()=>checked(await supabase.from('gl_trips').update({status:'completed'}).eq('id',trip.id).eq('status','active').select().single()),'Рейс завершён');}
+    if (name==='finish-trip') {const trip=myTrip();if(!trip)return;return void run(async()=>{checked(await supabase.from('gl_trips').update({status:'completed'}).eq('id',trip.id).eq('status','active').select().single());stopGpsOnLogout();},'Рейс завершён');}
     if (name==='start-gps') return void startGps();
     if (name==='stop-gps') return stopGps();
     if (name==='assign'&&item&&myTrip()) return void run(async()=>checked(await supabase.from('gl_containers').update({status:'assigned',trip_id:myTrip().id}).eq('id',item.id).eq('status','ready').select().single()),'Контейнер добавлен в рейс');
     if (name==='unassign'&&item) return void run(async()=>checked(await supabase.from('gl_containers').update({status:'ready',trip_id:null}).eq('id',item.id).eq('status','assigned').select().single()),'Контейнер убран из рейса');
     if (name==='pickup'&&item) return void scanDialog(item,'pickup');
     if (name==='undo-pickup'&&item) return void run(async()=>checked(await supabase.from('gl_containers').update({status:'assigned',pickup_code:null}).eq('id',item.id).eq('status','picked_up').select().single()),'Вывоз отменён');
+    if (name==='claim-delivery'&&order) return void run(async()=>checked(await supabase.from('gl_sales').update({delivery_status:'assigned'}).eq('id',order.id).eq('delivery_status','ready').select().single()),'Доставка взята');
+    if (name==='release-delivery'&&order) return void run(async()=>checked(await supabase.from('gl_sales').update({delivery_status:'ready'}).eq('id',order.id).eq('delivery_status','assigned').select().single()),'Доставка возвращена в очередь');
+    if (name==='scan-product'&&order) return void productScanDialog(order);
+    if (name==='complete-delivery'&&order) return productHandoverDialog(order);
   }
   if (staff.role==='production') {
     if (name==='receive'&&item) return void scanDialog(item,'receive');
@@ -415,12 +665,18 @@ async function action(event) {
     if (name==='start-drying'&&batch) return void run(async()=>checked(await supabase.from('gl_batches').update({status:'drying'}).eq('id',batch.id).eq('status','received').select().single()),'Сушка начата');
     if (name==='dry-weight'&&batch) return stageDialog(batch,'dry-weight');
     if (name==='pack-output'&&batch) return stageDialog(batch,'pack-output');
+    if (name==='product-qr'&&order) return void productQrDialog(order);
+  }
+  if (staff.role==='manager'&&order) {
+    if(name==='complete-pickup')return productHandoverDialog(order,true);
+    if(name==='cancel-product-order')return void run(async()=>checked(await supabase.from('gl_sales').update({delivery_status:'cancelled'}).eq('id',order.id).eq('delivery_status','ready').select().single()),'Заявка отменена');
   }
   if (staff.role==='manager'&&staff.can_manage_access&&name==='edit-staff') {const member=records.staff.find(x=>x.email===id);if(member)return staffEditDialog(member);}
   if (staff.role==='manager'&&staff.can_manage_access&&name==='edit-store') {const store=records.stores.find(x=>x.id===id);if(store)return storeEditDialog(store);}
 }
 function stopGpsOnLogout() { if (watchId!==null&&navigator.geolocation) navigator.geolocation.clearWatch(watchId); watchId=null; }
 document.addEventListener('click',event=>{void action(event);});
+document.addEventListener('change',event=>{if(event.target.name==='fulfillment')syncDeliveryField();});
 document.addEventListener('submit',event=>{
   if (event.target.id==='loginForm') {
     event.preventDefault();
@@ -451,7 +707,11 @@ document.addEventListener('submit',event=>{
   }
   if (event.target.id==='saleForm'&&staff?.role==='manager') {
     event.preventDefault();const f=event.target;
-    void run(async()=>checked(await supabase.from('gl_sales').insert({batch_id:f.elements.batch_id.value,packs:Number(f.elements.packs.value),unit_price:Number(f.elements.unit_price.value),channel:f.elements.channel.value}).select().single()),'Продажа сохранена');
+    const fulfillment=f.elements.fulfillment.value;
+    const address=f.elements.delivery_address.value.trim();
+    if(fulfillment==='delivery'&&address.length<5)return toast('Укажите адрес доставки');
+    if(fulfillment==='delivery'&&(!f.elements.latitude.value||!f.elements.longitude.value))return toast('Отметьте точку доставки на карте');
+    void run(async()=>checked(await supabase.from('gl_sales').insert({batch_id:f.elements.batch_id.value,packs:Number(f.elements.packs.value),unit_price:Number(f.elements.unit_price.value),customer_name:f.elements.customer_name.value.trim(),fulfillment,delivery_address:fulfillment==='delivery'?address:null,latitude:fulfillment==='delivery'?Number(f.elements.latitude.value):null,longitude:fulfillment==='delivery'?Number(f.elements.longitude.value):null,channel:f.elements.channel.value}).select().single()),'Заявка на продукт создана');
   }
 });
 void boot().catch(error=>{console.error(error);authScreen('Не удалось открыть сайт',error.message,'<button class="btn" data-action="reload">Повторить</button>');});

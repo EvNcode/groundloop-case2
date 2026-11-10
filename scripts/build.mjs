@@ -13,6 +13,7 @@ await build({
   sourcemap: false,
 });
 copyFileSync('src/styles.css', 'dist/styles.css');
+copyFileSync('node_modules/leaflet/dist/leaflet.css', 'dist/leaflet.css');
 copyFileSync('src/index.html', 'dist/index.html');
 const shell = readFileSync('src/shell.html', 'utf8');
 for (const [role, title] of Object.entries({
