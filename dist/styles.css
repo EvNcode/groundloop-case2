@@ -74,11 +74,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .nav-item {
   width: 100%;
   height: 36px;
-  display: grid;
-  grid-template-columns: 24px 1fr;
+  display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px;
+  padding: 0 12px;
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
@@ -86,11 +84,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   text-align: left;
   transition: color 140ms var(--ease), background 140ms var(--ease), border-color 140ms var(--ease);
 }
-.nav-item b { color: #68756f; font-family: "IBM Plex Mono", monospace; font-size: 10px; font-weight: 400; font-variant-numeric: tabular-nums; }
 .nav-item span { font-size: 14px; font-weight: 400; }
 .nav-item:hover { color: #f2f7f4; background: rgba(255,255,255,.04); }
 .nav-item.active { color: #f2f7f4; background: var(--sidebar-raised); border-color: rgba(255,255,255,.08); box-shadow: inset 2px 0 #4aa77d; }
-.nav-item.active b { color: #77c49f; }
 
 .main-content { grid-column: 2; min-width: 0; }
 .topbar {

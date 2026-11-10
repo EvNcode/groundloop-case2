@@ -245,6 +245,7 @@ function saveState() {
   }).catch((error) => {
     cloudSaveBlocked = true;
     document.querySelector("#syncStatus").textContent = "Не сохранено · обновите данные";
+    document.querySelector("#reloadWorkspace").hidden = false;
     render();
     showToast(`${error.message}. Обновите данные перед продолжением.`);
   });
@@ -295,6 +296,11 @@ function formatDate(value) {
   const date = new Date(`${value}T12:00:00`);
   return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short" }).format(date);
 }
+function plural(count, one, few, many) {
+  const lastTwo = count % 100;
+  const last = count % 10;
+  return lastTwo >= 11 && lastTwo <= 14 ? many : last === 1 ? one : last >= 2 && last <= 4 ? few : many;
+}
 
 function storageLabel(item) {
   if (!item.storedAt || ["collected", "rejected"].includes(item.status)) return "";
@@ -311,7 +317,7 @@ function renderKpis(metrics) {
     <div class="metrics-strip">
       <article class="metric"><div class="kpi-label">Активные точки</div><div class="kpi-value">${metrics.activeStores}</div><div class="kpi-footer">из ${state.stores.length} точек сети</div></article>
       <article class="metric"><div class="kpi-label">Учтено за цикл</div><div class="kpi-value">${formatNumber(metrics.wetKg, 1)} <small>кг</small></div><div class="kpi-footer">${metrics.measuredPct}% взвешено</div></article>
-      <article class="metric metric-attention"><div class="kpi-label">К вывозу</div><div class="kpi-value">${formatNumber(metrics.readyKg, 1)} <small>кг</small></div><div class="kpi-footer">${metrics.readyCount} готовых контейнера</div></article>
+      <article class="metric metric-attention"><div class="kpi-label">К вывозу</div><div class="kpi-value">${formatNumber(metrics.readyKg, 1)} <small>кг</small></div><div class="kpi-footer">${metrics.readyCount} ${plural(metrics.readyCount, "готовый контейнер", "готовых контейнера", "готовых контейнеров")}</div></article>
       <article class="metric"><div class="kpi-label">Модельная прибыль</div><div class="kpi-value">${formatMoney(metrics.economics.profit)}</div><div class="kpi-footer">${metrics.economics.marginPct}% · ${SCENARIOS[state.scenario].label.toLowerCase()} расчёт</div></article>
     </div>`;
 }
@@ -366,11 +372,13 @@ function renderOverview() {
           </div>
         </article>
         <article class="panel attention-panel">
-          <div class="panel-header"><div><h2>Задачи</h2></div><span class="attention-count">${metrics.readyCount + pendingQuality + activeRoutes}</span></div>
+          <div class="panel-header"><div><h2>Задачи</h2></div><span class="attention-count">${metrics.readyCount + pendingQuality + activeRoutes + unbatched.length}</span></div>
           <div class="action-list">
-            <button class="action-row" data-view-link="logistics"><span class="action-mark urgent"></span><div><strong>Вывоз · ${metrics.readyCount}</strong><small>${formatNumber(metrics.readyKg, 1)} кг</small></div><span class="row-arrow">→</span></button>
-            <button class="action-row" data-view-link="collections"><span class="action-mark review"></span><div><strong>Проверка · ${pendingQuality}</strong></div><span class="row-arrow">→</span></button>
-            <button class="action-row" data-view-link="production"><span class="action-mark neutral"></span><div><strong>Без партии · ${unbatched.length}</strong></div><span class="row-arrow">→</span></button>
+            ${metrics.readyCount ? `<button class="action-row" data-view-link="logistics"><span class="action-mark urgent"></span><div><strong>Вывоз · ${metrics.readyCount}</strong><small>${formatNumber(metrics.readyKg, 1)} кг</small></div><span class="row-arrow">→</span></button>` : ""}
+            ${activeRoutes ? `<button class="action-row" data-view-link="logistics"><span class="action-mark urgent"></span><div><strong>В маршруте · ${activeRoutes}</strong></div><span class="row-arrow">→</span></button>` : ""}
+            ${pendingQuality ? `<button class="action-row" data-view-link="collections"><span class="action-mark review"></span><div><strong>Проверка · ${pendingQuality}</strong></div><span class="row-arrow">→</span></button>` : ""}
+            ${unbatched.length ? `<button class="action-row" data-view-link="production"><span class="action-mark neutral"></span><div><strong>Без партии · ${unbatched.length}</strong></div><span class="row-arrow">→</span></button>` : ""}
+            ${!metrics.readyCount && !activeRoutes && !pendingQuality && !unbatched.length ? `<div class="empty-state">Сейчас задач нет</div>` : ""}
           </div>
         </article>
       </section>
@@ -953,8 +961,8 @@ async function startCloud() {
   cloudSaveBlocked = false;
   app.hidden = false;
   document.querySelector("#syncStatus").textContent = "Сохранено";
-  document.querySelector("#reloadWorkspace").hidden = false;
-  document.querySelector("#reloadWorkspace").textContent = "Обновить данные";
+  document.querySelector("#reloadWorkspace").hidden = true;
+  document.querySelector("#reloadWorkspace").textContent = "Повторить";
   render();
   setInterval(refreshWorkspace, 3500);
 }
@@ -975,8 +983,13 @@ async function refreshWorkspace() {
       document.querySelector("#syncStatus").textContent = "Обновлено";
       render();
     }
+    if (remote) {
+      document.querySelector("#reloadWorkspace").hidden = true;
+      if (document.querySelector("#syncStatus").textContent === "Связь прервана") document.querySelector("#syncStatus").textContent = "Сохранено";
+    }
   } catch {
     document.querySelector("#syncStatus").textContent = "Связь прервана";
+    document.querySelector("#reloadWorkspace").hidden = false;
   } finally {
     refreshInFlight = false;
   }
