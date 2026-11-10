@@ -1,5 +1,7 @@
 # GroundLoop
 
+Рабочая версия: https://evncode.github.io/groundloop-case2/
+
 Демо полного пути кофейного жмыха для кейса 2 Global Coffee × Coyote: сбор на точках, хранение, вывоз, переработка, выпуск набора подставок и продажа. Все числа и операции в демо синтетические.
 
 ## Как работает
@@ -24,7 +26,7 @@ npm test
 node --check dist/app.js
 ```
 
-Публичная версия разворачивается GitHub Pages из `dist/` через `.github/workflows/pages.yml`. Для публикации в репозитории GitHub Pages должен использовать GitHub Actions как источник.
+Публичная версия разворачивается GitHub Pages из `dist/` через `.github/workflows/pages.yml` при обновлении ветки `main`.
 
 ## Границы прототипа
 
