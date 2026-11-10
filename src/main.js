@@ -24,6 +24,8 @@ let activeTab = 'overview';
 let selectedMapTrip = null;
 let journalFilter = 'all';
 let activeMap = null;
+let activeBaseLayer = null;
+let mapStyle = localStorage.getItem('gl_map_style') === 'streets' ? 'streets' : 'imagery';
 let gpsAttemptedTrip = null;
 let lastNotificationId = null;
 let refreshing = false;
@@ -49,7 +51,28 @@ const stat = (label, value, hint = '') => `<article class="stat"><span>${esc(lab
 const link = path => new URL(path, location.href).href;
 const ageMs = value => Date.now() - Date.parse(value);
 const archivedContainer = item => ageMs(item.created_at) > 86400000 && ['cancelled','rejected','received','batched'].includes(item.status);
-const tabs = items => `<nav class="tabs" aria-label="Разделы">${items.map(([id,label])=>`<button class="tab ${activeTab===id?'active':''}" data-action="tab" data-id="${id}">${label}</button>`).join('')}</nav>`;
+const navPaths = {
+  overview:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',
+  requests:'M4 5h16 M4 12h16 M4 19h12 M2 5h.01 M2 12h.01 M2 19h.01',
+  map:'M3 6l6-3 6 3 6-3v15l-6 3-6-3-6 3z M9 3v15 M15 6v15',
+  archive:'M3 4h18v4H3z M5 8v12h14V8 M10 13h4',
+  deliveries:'M3 7h12v10H3z M15 10h3l3 3v4h-6 M7 20a2 2 0 1 0 0-4 2 2 0 0 0 0 4 M17 20a2 2 0 1 0 0-4 2 2 0 0 0 0 4',
+  intake:'M4 3h16v18H4z M8 8h8 M8 12h8 M8 16h5',
+  batches:'M3 7l9-4 9 4-9 4z M3 7v10l9 4 9-4V7 M12 11v10',
+  dispatch:'M3 12h14 M13 8l4 4-4 4 M4 5h16v14H4z',
+  sales:'M3 5h18v14H3z M3 9h18 M7 15h4',
+  journal:'M4 4h16v16H4z M8 8h8 M8 12h8 M8 16h5',
+  staff:'M16 20v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6 M17 10h5 M19.5 7.5v5',
+  stores:'M4 10l8-7 8 7v11H4z M9 21v-7h6v7',
+};
+const navIcon = id => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${navPaths[id]||navPaths.overview}"/></svg>`;
+const tabs = items => `<nav class="tabs" aria-label="Разделы">${items.map(([id,label])=>`<button class="tab ${activeTab===id?'active':''}" data-action="tab" data-id="${id}" aria-current="${activeTab===id?'page':'false'}">${navIcon(id)}<span>${label}</span></button>`).join('')}</nav>`;
+const basemap = (map, style = mapStyle) => L.tileLayer(style === 'imagery'
+  ? 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+  : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
+  { maxZoom: 18, attribution: style === 'imagery'
+    ? '&copy; Esri, Vantor, Earthstar Geographics and GIS User Community'
+    : '&copy; Esri, HERE, Garmin, OpenStreetMap contributors and GIS User Community' }).addTo(map);
 
 function toast(message) {
   const el = document.querySelector('#toast');
@@ -60,8 +83,11 @@ function toast(message) {
 }
 function brand() { return `<a class="brand" href="./index.html">GroundLoop<span class="brand-dot" aria-hidden="true">.</span></a>`; }
 function shell(title, subtitle, actions, body) {
-  if (activeMap) { activeMap.remove(); activeMap = null; }
-  app.innerHTML = `<div class="shell"><header class="top">${brand()}<div class="top-right"><div class="top-user"><strong>${esc(staff.full_name)}</strong><small>${esc(user.email)}</small></div><button data-action="logout">Выйти</button></div></header><main class="container"><section class="hero"><div><div class="eyebrow">${esc(pageNames[staff.role])}${staff.store_id ? ` / ${esc(storeName(staff.store_id))}` : ''}</div><h1>${esc(title)}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="hero-actions">${actions || ''}</div></section>${body}</main></div>`;
+  if (activeMap) { activeMap.remove(); activeMap = null; activeBaseLayer = null; }
+  app.innerHTML = `<div class="shell"><header class="top"><div class="top-inner">${brand()}<div class="top-context"><span class="top-divider"></span><span>Шымкент</span></div><div class="top-right"><div class="top-user"><strong>${esc(staff.full_name)}</strong><small>${esc(user.email)}</small></div><button data-action="logout">Выйти</button></div></div></header><main class="container"><section class="hero"><div><div class="eyebrow">${esc(pageNames[staff.role])}${staff.store_id ? ` / ${esc(storeName(staff.store_id))}` : ''}</div><h1>${esc(title)}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="hero-actions">${actions || ''}</div></section><div class="workspace">${body}</div></main></div>`;
+  const workspace=app.querySelector('.workspace');
+  const nav=workspace.querySelector(':scope > .tabs');
+  if(nav){const main=document.createElement('div');main.className='workspace-main';for(const child of [...workspace.children])if(child!==nav)main.append(child);workspace.append(main);}
   syncDeliveryField();
   if (document.querySelector('#operationsMap')) requestAnimationFrame(() => void drawOperationsMap());
 }
@@ -315,11 +341,11 @@ function mapWorkspace(role) {
   const gps = chosen ? positionFor(chosen.id) : null;
   const fresh = gps && ageMs(gps.updated_at)<120000;
   const choices = trips.length>1 ? `<div class="trip-choices">${trips.map(t=>`<button class="trip-choice ${chosen?.id===t.id?'selected':''}" data-action="select-map-trip" data-id="${t.id}"><strong>${esc(t.driver_name)}</strong><span>${esc(t.code)}</span></button>`).join('')}</div>` : '';
-  const stops = grouped.map(({store,items},i)=>`<div class="map-stop"><span class="stop-number">${i+1}</span><div><strong>${esc(store?.name||items[0].store_id)}</strong><small>${esc(store?.address||'Точный адрес не указан')} · ${chosen?`${items.filter(x=>x.status==='assigned').length} к вывозу · ${items.filter(x=>x.status==='picked_up').length} забрано`:`${items.length} ${word(items.length,'заявка','заявки','заявок')}`}</small></div></div>`).join('');
+  const stops = grouped.map(({store,items},i)=>`<button class="map-stop" type="button" data-action="focus-map" data-lat="${store?.latitude??''}" data-lon="${store?.longitude??''}"><span class="stop-number">${i+1}</span><span class="map-stop-copy"><strong>${esc(store?.name||items[0].store_id)}</strong><small>${esc(store?.address||'Точный адрес не указан')} · ${chosen?`${items.filter(x=>x.status==='assigned').length} к вывозу · ${items.filter(x=>x.status==='picked_up').length} забрано`:`${items.length} ${word(items.length,'заявка','заявки','заявок')}`}</small></span><span class="stop-arrow" aria-hidden="true">↗</span></button>`).join('');
   const deliveries = role==='logistics' ? records.sales.filter(x=>x.fulfillment==='delivery'&&x.delivery_trip_id===chosen?.id&&['assigned','out_for_delivery'].includes(x.delivery_status)).map(x=>`<div class="map-stop"><span class="stop-number">↗</span><div><strong>${esc(x.customer_name)}</strong><small>${esc(x.delivery_address)}</small></div></div>`).join('') : '';
-  return `<div class="map-layout"><section class="card map-card"><div class="map-toolbar"><strong>${chosen?esc(chosen.driver_name+' · '+chosen.code):'Точки и рейсы'}</strong><span>${gps?`${fresh?'GPS сейчас':'Последний GPS'} · ${dateTime(gps.updated_at)}`:'GPS ещё не передан'}</span></div><div id="operationsMap" class="operations-map" role="img" aria-label="Карта заявок и рейсов"></div><div class="map-foot" id="routeMeta">${grouped.length?'Остановок: '+grouped.length:'Нет остановок с заявками'}</div></section><aside class="card"><div class="card-head"><h2>Маршрут</h2></div><div class="card-body">${choices}${stops||empty('Остановок нет','Заявки появятся здесь автоматически.')}${deliveries}</div></aside></div>`;
+  return `<div class="map-layout"><section class="card map-card"><div class="map-toolbar"><div class="map-toolbar-main"><strong>${chosen?esc(chosen.driver_name+' · '+chosen.code):'Карта точек и рейсов'}</strong><span>${gps?`${fresh?'Геопозиция обновлена':'Последняя геопозиция'} · ${dateTime(gps.updated_at)}`:`Шымкент · ${records.stores.filter(s=>s.active).length} точек`}</span></div><div class="map-styles" role="group" aria-label="Вид карты"><button type="button" class="map-style ${mapStyle==='streets'?'selected':''}" data-action="map-style" data-id="streets">Улицы</button><button type="button" class="map-style ${mapStyle==='imagery'?'selected':''}" data-action="map-style" data-id="imagery">Спутник</button></div></div><div id="operationsMap" class="operations-map" role="img" aria-label="Карта заявок и рейсов"></div><div class="map-foot"><span id="routeMeta">${grouped.length?'Остановок: '+grouped.length:'Нет остановок с заявками'}</span><span class="map-legend"><i></i>Точка сбора <i></i>Логист</span></div></section><aside class="card route-panel"><div class="card-head"><div><h2>Остановки</h2><p>${chosen?esc(chosen.code):'Заявки к вывозу'}</p></div><span class="route-count">${grouped.length}</span></div><div class="card-body">${choices}${stops||empty('Остановок нет','Заявки появятся здесь автоматически.')}${deliveries}</div></aside></div>`;
 }
-function mapPoint(lat,lon) { return Number.isFinite(Number(lat))&&Number.isFinite(Number(lon))&&lat!==null&&lon!==null ? [Number(lat),Number(lon)] : null; }
+function mapPoint(lat,lon) { return lat!==null&&lon!==null&&lat!==''&&lon!==''&&Number.isFinite(Number(lat))&&Number.isFinite(Number(lon)) ? [Number(lat),Number(lon)] : null; }
 function routeStops(trip) {
   const ids = [...new Set(records.containers.filter(c=>c.trip_id===trip.id&&c.status==='assigned').map(c=>c.store_id))];
   const stores=ids.map(id=>records.stores.find(s=>s.id===id)).filter(s=>s&&mapPoint(s.latitude,s.longitude));
@@ -332,7 +358,7 @@ async function drawOperationsMap() {
   const firstStore = records.stores.find(s=>s.active&&mapPoint(s.latitude,s.longitude));
   const map = L.map(element,{zoomControl:true,scrollWheelZoom:false}).setView(firstStore ? mapPoint(firstStore.latitude,firstStore.longitude) : [42.323,69.595],12);
   activeMap = map;
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
+  activeBaseLayer = basemap(map);
   const bounds=[];
   const role=staff.role, chosen=selectedTrip();
   const visibleIds = role==='barista' ? [staff.store_id] : records.stores.filter(s=>s.active).map(s=>s.id);
@@ -340,7 +366,7 @@ async function drawOperationsMap() {
     const point=mapPoint(store.latitude,store.longitude);
     if (!point) continue;
     const count=records.containers.filter(c=>c.store_id===store.id&&['ready','assigned','picked_up'].includes(c.status)).length;
-    L.circleMarker(point,{radius:count?10:7,color:'#176944',fillColor:'#56a87b',fillOpacity:.9,weight:2})
+    L.marker(point,{icon:L.divIcon({className:'map-marker',html:`<span class="store-marker ${count?'has-work':''}">${count||'•'}</span>`,iconSize:[36,36],iconAnchor:[18,18]})})
       .bindPopup(`<strong>${esc(store.name)}</strong><br>${esc(store.address||'Адрес не указан')}<br>${count} ${word(count,'заявка','заявки','заявок')}`).addTo(map);
     bounds.push(point);
   }
@@ -349,13 +375,13 @@ async function drawOperationsMap() {
     const pos=positionFor(trip.id),point=pos&&mapPoint(pos.latitude,pos.longitude);
     if(!point)continue;
     const current=ageMs(pos.updated_at)<120000;
-    L.circleMarker(point,{radius:11,color:'#fff',weight:3,fillColor:current?'#1d6cba':'#7c8a83',fillOpacity:1})
+    L.marker(point,{icon:L.divIcon({className:'map-marker',html:`<span class="driver-marker ${current?'online':''}">↗</span>`,iconSize:[40,40],iconAnchor:[20,20]})})
       .bindPopup(`<strong>${esc(trip.driver_name)}</strong><br>${current?'GPS сейчас':'Последнее положение'} · ${dateTime(pos.updated_at)}<br>${esc(trip.code)}`).addTo(map);
     bounds.push(point);
   }
   if(role==='logistics')for(const order of records.sales.filter(x=>x.fulfillment==='delivery'&&x.delivery_trip_id===chosen?.id&&['assigned','out_for_delivery'].includes(x.delivery_status))){
     const point=mapPoint(order.latitude,order.longitude);if(!point)continue;
-    L.circleMarker(point,{radius:9,color:'#a56e28',fillColor:'#eab260',fillOpacity:.95,weight:2})
+    L.marker(point,{icon:L.divIcon({className:'map-marker',html:'<span class="delivery-marker">◆</span>',iconSize:[36,36],iconAnchor:[18,18]})})
       .bindPopup(`<strong>${esc(order.customer_name)}</strong><br>${esc(order.delivery_address)}`).addTo(map);bounds.push(point);
   }
   if(bounds.length)map.fitBounds(bounds,{padding:[36,36],maxZoom:14});
@@ -530,6 +556,7 @@ function renderManagement() {
   if (activeTab==='overview') {
     const liveTrip=records.trips.filter(x=>x.status==='active');
     body += `<section class="stats">${stat('Сырьё в системе',`${number(activeContainers.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`,`${activeContainers.length} контейнеров`)}${stat('В пути',records.containers.filter(x=>['assigned','picked_up'].includes(x.status)).length)}${stat('Произведено',`${produced} уп.`)}${stat('Выручка',money(revenue),`${sold} уп. передано`)}</section><div class="overview-grid"><section class="card"><div class="card-head"><h2>Работа сегодня</h2></div><div class="flow-list"><div><span>Готово на точках</span><strong>${records.containers.filter(x=>x.status==='ready').length}</strong></div><div><span>Рейсы в работе</span><strong>${liveTrip.length}</strong></div><div><span>Ожидает приёмки</span><strong>${records.containers.filter(x=>x.status==='picked_up').length}</strong></div><div><span>Партии в производстве</span><strong>${records.batches.filter(x=>x.status!=='complete').length}</strong></div><div><span>Заказы продукта</span><strong>${records.sales.filter(x=>!['delivered','cancelled'].includes(x.delivery_status)).length}</strong></div></div></section><section class="card"><div class="card-head"><h2>Активные рейсы</h2>${button('Открыть карту','tab',`data-id="map"`,'btn-sm')}</div>${liveTrip.length?liveTrip.map(t=>`<div class="item"><div class="item-title">${esc(t.driver_name)}</div><div class="item-sub mono">${esc(t.code)} · ${records.containers.filter(c=>c.trip_id===t.id&&['assigned','picked_up'].includes(c.status)).length} заявок</div><div class="item-sub">${positionFor(t.id)?`GPS · ${dateTime(positionFor(t.id).updated_at)}`:'GPS не передан'}</div></div>`).join(''):empty('Рейсов нет','Новые рейсы появятся здесь.')}</section></div>`;
+    body += mapWorkspace('manager');
   } else if (activeTab==='map') {
     body += mapWorkspace('manager');
   } else if (activeTab==='journal') {
@@ -572,7 +599,7 @@ function mountStorePicker(dialog,latitude,longitude) {
     if(!dialog.open)return;
     const point=mapPoint(latitude,longitude);
     const map=L.map(dialog.querySelector('#storePickMap'),{scrollWheelZoom:false}).setView(point||[42.323,69.595],point?16:12);
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
+    basemap(map);
     let pin=point?L.circleMarker(point,{radius:9,color:'#176944',fillColor:'#56a87b',fillOpacity:1}).addTo(map):null;
     map.on('click',event=>{
       const {lat,lng}=event.latlng;
@@ -592,7 +619,7 @@ function deliveryPinDialog() {
   requestAnimationFrame(()=>{
     if(!dialog.open)return;
     const map=L.map(dialog.querySelector('#deliveryPickMap'),{scrollWheelZoom:false}).setView(current||[42.323,69.595],current?16:12);
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
+    basemap(map);
     let point=current;
     let pin=point?L.circleMarker(point,{radius:9,color:'#176944',fillColor:'#56a87b',fillOpacity:1}).addTo(map):null;
     if(point)dialog.querySelector('#saveDeliveryPin').disabled=false;
@@ -617,6 +644,8 @@ async function action(event) {
   if (!el) return;
   const {action: name,id}=el.dataset;
   if (name==='close-modal') return closeModal();
+  if (name==='map-style' && ['streets','imagery'].includes(id) && activeMap) { mapStyle=id; localStorage.setItem('gl_map_style',id); if(activeBaseLayer)activeMap.removeLayer(activeBaseLayer); activeBaseLayer=basemap(activeMap,id); document.querySelectorAll('.map-style').forEach(x=>x.classList.toggle('selected',x.dataset.id===id)); return; }
+  if (name==='focus-map' && activeMap) { const point=mapPoint(el.dataset.lat,el.dataset.lon); if(point)activeMap.flyTo(point,16,{duration:.35}); return; }
   if (name==='reload') return location.reload();
   if (name==='link-login') return loginScreen('link');
   if (name==='password-login') return loginScreen();
