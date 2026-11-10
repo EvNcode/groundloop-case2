@@ -126,3 +126,48 @@ body{background:#f6f7f5}
 @media(max-width:980px){.workspace{display:block}.workspace-main{min-width:0}.tabs{position:static;display:flex;flex-direction:row;gap:4px;overflow-x:auto;margin-bottom:18px;padding:0 0 6px;border-bottom:1px solid #e0e6e0}.tab{width:auto;white-space:nowrap}.map-layout{grid-template-columns:1fr}.route-panel{order:2}.top-inner{gap:16px}}
 @media(max-width:640px){.top{height:58px;padding:0 14px}.top-inner{gap:12px}.top-context{font-size:12px;gap:10px}.top-divider{height:18px}.top-user strong{max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.top-right{gap:10px}.container{padding:20px 14px 100px}.hero{display:flex;align-items:center;gap:12px;margin-bottom:18px}.hero h1{font-size:23px}.hero-actions{margin:0 0 0 auto}.hero-actions .btn{min-height:38px;white-space:nowrap}.stats{gap:8px}.stat{min-height:80px;padding:12px}.stat strong{font-size:22px}.card-head,.item{padding:14px}.card-body{padding:14px}.map-toolbar{display:flex;align-items:center}.map-toolbar-main{min-width:0}.map-toolbar-main strong{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.map-toolbar-main span{font-size:10px}.map-style{padding:5px 7px;font-size:11px}.operations-map{height:53vh;min-height:330px}.map-foot{display:block}.map-legend{margin-top:6px}.tabs{gap:0}body[data-role="barista"] .tabs,body[data-role="logistics"] .tabs,body[data-role="production"] .tabs{padding:0 8px env(safe-area-inset-bottom);box-shadow:0 -5px 24px #172a1c14}body[data-role="barista"] .tab,body[data-role="logistics"] .tab,body[data-role="production"] .tab{display:flex;flex-direction:column;gap:4px;justify-content:center;min-height:61px;font-size:11px;padding:7px 3px;border-radius:0}body[data-role="barista"] .tab svg,body[data-role="logistics"] .tab svg,body[data-role="production"] .tab svg{width:19px;height:19px}body[data-role="barista"] .tab.active,body[data-role="logistics"] .tab.active,body[data-role="production"] .tab.active{background:#fff;border-top:2px solid #176b42}.item-actions .btn{min-height:42px}}
 @media(max-width:390px){.top-context{display:none}.top-user small{display:none}.hero{flex-wrap:wrap}.hero-actions{width:100%;margin:2px 0 0}.hero-actions .btn{width:100%}}
+
+/* Shared light and dark workspaces. */
+body{background:#f5f7f7;color:#1c2d2c}
+.top{border-bottom-color:#dde7e4}
+.stat:first-child{background:#e7f1ee;border-color:#d1e5dc}
+.tab.active{background:#e1eee9;color:#135d43}
+.theme-toggle{display:inline-flex;align-items:center;gap:7px;justify-content:center;min-width:38px;min-height:38px;padding:5px 9px!important;border:1px solid #d8e4df!important;border-radius:8px;color:#315344!important;font-size:17px!important;line-height:1}
+.theme-toggle span{font-size:12px}
+.auth-head{display:flex;align-items:start;justify-content:space-between;gap:15px;margin-bottom:36px}
+.auth-head .brand{margin-bottom:0}
+.arrival-banner{display:flex;align-items:center;gap:12px;padding:12px 16px;margin-bottom:15px;border:1px solid #b9d9cf;border-radius:10px;background:#edf7f3;color:#174e3b}
+.arrival-banner>div{flex:1;min-width:0}.arrival-banner strong,.arrival-banner small{display:block}.arrival-banner strong{font-size:14px}.arrival-banner small{margin-top:3px;color:#537267;font-size:12px;line-height:1.4}
+.arrival-pulse{width:9px;height:9px;border-radius:50%;background:#21845a;box-shadow:0 0 0 5px #21845a1e;flex:none}
+.map-stop.selected{background:#edf5f1;border-radius:7px}.map-stop.selected .stop-number{background:#176b42;color:white}
+.history-search{display:grid;grid-template-columns:minmax(150px,1fr) 155px 160px;gap:9px;padding:14px 18px;border-bottom:1px solid #e5ebe8}
+.history-search label{display:grid;gap:5px;color:#5c7368;font-size:11px;font-weight:600}
+.history-search input,.history-search select{width:100%;height:39px;min-width:0;border:1px solid #ccd9d2;border-radius:7px;background:#fff;color:#1b3328;padding:7px 9px;outline:none;font-size:13px}
+.history-search input:focus,.history-search select:focus{border-color:#277c58;box-shadow:0 0 0 3px #277c5822}
+.history-more{display:flex;justify-content:center;padding:14px;border-top:1px solid #e5ebe8}
+body[data-theme="dark"]{background:#111a18;color:#e5eee8;color-scheme:dark}
+body[data-theme="dark"] .top{background:#17221e;border-bottom-color:#304038;color:#e5eee8}
+body[data-theme="dark"] .brand,body[data-theme="dark"] .hero h1,body[data-theme="dark"] .card-head h2,body[data-theme="dark"] .item-title,body[data-theme="dark"] .flow-list strong,body[data-theme="dark"] .stat strong,body[data-theme="dark"] .auth-card h1{color:#e7f1eb}
+body[data-theme="dark"] .top-context,body[data-theme="dark"] .top-user small,body[data-theme="dark"] .top button,body[data-theme="dark"] .hero p,body[data-theme="dark"] .eyebrow,body[data-theme="dark"] .card-head p,body[data-theme="dark"] .item-sub,body[data-theme="dark"] .item-meta,body[data-theme="dark"] .card-empty,body[data-theme="dark"] small,body[data-theme="dark"] .muted{color:#a0b5a9}
+body[data-theme="dark"] .top-divider,body[data-theme="dark"] .hero{border-color:#31433a}
+body[data-theme="dark"] .card,body[data-theme="dark"] .stat,body[data-theme="dark"] .auth-card,body[data-theme="dark"] .entry-card,body[data-theme="dark"] .shift-strip,body[data-theme="dark"] dialog{background:#1c2822;border-color:#35463c;color:#e5eee8;box-shadow:none}
+body[data-theme="dark"] .stat:first-child{background:#23382d;border-color:#3c5947}
+body[data-theme="dark"] .card-head,body[data-theme="dark"] .item,body[data-theme="dark"] .flow-list>div,body[data-theme="dark"] .map-toolbar,body[data-theme="dark"] .map-foot,body[data-theme="dark"] .map-stop,body[data-theme="dark"] .modal-head,body[data-theme="dark"] .history-search,body[data-theme="dark"] .history-more{border-color:#334239}
+body[data-theme="dark"] .tab{color:#a5b9ad}body[data-theme="dark"] .tab:hover,body[data-theme="dark"] .map-stop:hover{background:#293a2f;color:#e9f4eb}
+body[data-theme="dark"] .tab.active,body[data-theme="dark"] .map-stop.selected,body[data-theme="dark"] .trip-choice.selected{background:#254535;color:#a9e1bd}
+body[data-theme="dark"] .btn,body[data-theme="dark"] .theme-toggle,body[data-theme="dark"] .trip-choice,body[data-theme="dark"] .map-styles,body[data-theme="dark"] .map-style.selected{background:#26362c;color:#dcece0;border-color:#455b4c;box-shadow:none}
+body[data-theme="dark"] .btn:hover,body[data-theme="dark"] .theme-toggle:hover{background:#344c3a}
+body[data-theme="dark"] .btn-primary,body[data-theme="dark"] .btn-primary:hover{background:#278653;border-color:#278653;color:#fff}
+body[data-theme="dark"] .btn-danger{color:#efaa9d;border-color:#76544a}
+body[data-theme="dark"] .field,body[data-theme="dark"] .checkrow,body[data-theme="dark"] .history-search label{color:#b8cfc0}
+body[data-theme="dark"] .field input,body[data-theme="dark"] .field select,body[data-theme="dark"] .field textarea,body[data-theme="dark"] .scan-input,body[data-theme="dark"] .history-search input,body[data-theme="dark"] .history-search select{background:#142019;border-color:#405549;color:#e5eee8}
+body[data-theme="dark"] .item-note,body[data-theme="dark"] .split-values>div,body[data-theme="dark"] .notice{background:#23352a;border-color:#3e654a;color:#cbded0}
+body[data-theme="dark"] .badge,body[data-theme="dark"] .badge.neutral{background:#29382e;border-color:#405246;color:#b7cdbb}
+body[data-theme="dark"] .badge.warn,body[data-theme="dark"] .notice.warn{background:#3d3424;border-color:#665739;color:#edcb85}
+body[data-theme="dark"] .badge.bad{background:#452e2c;border-color:#70504b;color:#e7a8a0}
+body[data-theme="dark"] .arrival-banner{background:#1d392b;border-color:#356449;color:#b2e9c4}
+body[data-theme="dark"] .arrival-banner small{color:#91bfa1}
+body[data-theme="dark"] .shift-strip strong,body[data-theme="dark"] .card-empty strong{color:#e7f1eb}
+body[data-theme="dark"] .map-foot,body[data-theme="dark"] .map-toolbar-main span,body[data-theme="dark"] .map-stop small,body[data-theme="dark"] .trip-choice span{color:#a5b8a9}
+body[data-theme="dark"] .operations-map{background:#19231e}
+@media(max-width:640px){.theme-toggle span{display:none}.history-search{grid-template-columns:minmax(0,1fr) 130px}.history-search label:last-child{grid-column:1/-1}.arrival-banner{flex-wrap:wrap}.arrival-banner .btn{margin-left:21px}body[data-theme="dark"] .tabs{border-color:#334239}body[data-theme="dark"][data-role="barista"] .tabs,body[data-theme="dark"][data-role="logistics"] .tabs,body[data-theme="dark"][data-role="production"] .tabs{background:#17221e;border-color:#34473c}body[data-theme="dark"] .tab.active{background:#203c2b!important}}

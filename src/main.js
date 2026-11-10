@@ -3,6 +3,7 @@ import { BrowserQRCodeReader } from '@zxing/browser';
 import QRCode from 'qrcode';
 import L from 'leaflet';
 import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from '../dist/supabase-config.js';
+import { GOOGLE_MAPS_BROWSER_KEY } from '../dist/maps-config.js';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
@@ -22,10 +23,22 @@ let staff = null;
 let records = { stores: [], staff: [], trips: [], containers: [], batches: [], sales: [], positions: [], events: [], notifications: [] };
 let activeTab = 'overview';
 let selectedMapTrip = null;
+let selectedMapRequest = null;
 let journalFilter = 'all';
 let activeMap = null;
 let activeBaseLayer = null;
-let mapStyle = localStorage.getItem('gl_map_style') === 'imagery' ? 'imagery' : 'streets';
+let mapStyle = localStorage.getItem('gl_map_style') === 'satellite' ? 'satellite' : 'roadmap';
+let theme = localStorage.getItem('gl_theme') === 'dark' ? 'dark' : 'light';
+let salesHistory = [];
+let historyQuery = '';
+let historyDate = '';
+let historyOldestFirst = false;
+let historyOffset = 0;
+let historyHasMore = false;
+let historyLoading = false;
+let historyTimer;
+let routeCache = new Map();
+document.body.dataset.theme = theme;
 let gpsAttemptedTrip = null;
 let lastNotificationId = null;
 let refreshing = false;
@@ -67,12 +80,8 @@ const navPaths = {
 };
 const navIcon = id => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${navPaths[id]||navPaths.overview}"/></svg>`;
 const tabs = items => `<nav class="tabs" aria-label="Разделы">${items.map(([id,label])=>`<button class="tab ${activeTab===id?'active':''}" data-action="tab" data-id="${id}" aria-current="${activeTab===id?'page':'false'}">${navIcon(id)}<span>${label}</span></button>`).join('')}</nav>`;
-const basemap = (map, style = mapStyle) => L.tileLayer(style === 'imagery'
-  ? 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
-  : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
-  { maxZoom: 18, attribution: style === 'imagery'
-    ? '&copy; Esri, Vantor, Earthstar Geographics and GIS User Community'
-    : '&copy; Esri, HERE, Garmin, OpenStreetMap contributors and GIS User Community' }).addTo(map);
+const basemap = map => L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  { maxZoom: 18, attribution: '&copy; Esri, Vantor, Earthstar Geographics and GIS User Community' }).addTo(map);
 
 function toast(message) {
   const el = document.querySelector('#toast');
@@ -83,8 +92,9 @@ function toast(message) {
 }
 function brand() { return `<a class="brand" href="./index.html">GroundLoop<span class="brand-dot" aria-hidden="true">.</span></a>`; }
 function shell(title, subtitle, actions, body) {
-  if (activeMap) { activeMap.remove(); activeMap = null; activeBaseLayer = null; }
-  app.innerHTML = `<div class="shell"><header class="top"><div class="top-inner">${brand()}<div class="top-context"><span class="top-divider"></span><span>Шымкент</span></div><div class="top-right"><div class="top-user"><strong>${esc(staff.full_name)}</strong><small>${esc(user.email)}</small></div><button data-action="logout">Выйти</button></div></div></header><main class="container"><section class="hero"><div><div class="eyebrow">${esc(pageNames[staff.role])}${staff.store_id ? ` / ${esc(storeName(staff.store_id))}` : ''}</div><h1>${esc(title)}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="hero-actions">${actions || ''}</div></section><div class="workspace">${body}</div></main></div>`;
+  if (activeMap?.remove) activeMap.remove();
+  activeMap = null; activeBaseLayer = null;
+  app.innerHTML = `<div class="shell"><header class="top"><div class="top-inner">${brand()}<div class="top-context"><span class="top-divider"></span><span>Шымкент</span></div><div class="top-right"><button class="theme-toggle" data-action="toggle-theme" aria-label="${theme==='dark'?'Включить светлую тему':'Включить тёмную тему'}" title="${theme==='dark'?'Светлая тема':'Тёмная тема'}">${theme==='dark'?'☀':'◐'}<span>${theme==='dark'?'Светлая':'Тёмная'}</span></button><div class="top-user"><strong>${esc(staff.full_name)}</strong><small>${esc(user.email)}</small></div><button data-action="logout">Выйти</button></div></div></header><main class="container"><section class="hero"><div><div class="eyebrow">${esc(pageNames[staff.role])}${staff.store_id ? ` / ${esc(storeName(staff.store_id))}` : ''}</div><h1>${esc(title)}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="hero-actions">${actions || ''}</div></section><div class="workspace">${body}</div></main></div>`;
   const workspace=app.querySelector('.workspace');
   const nav=workspace.querySelector(':scope > .tabs');
   if(nav){const main=document.createElement('div');main.className='workspace-main';for(const child of [...workspace.children])if(child!==nav)main.append(child);workspace.append(main);}
@@ -101,7 +111,7 @@ function syncDeliveryField() {
   form.querySelector('[data-action=delivery-pin]').hidden=!delivery;
 }
 function authScreen(title, description, content) {
-  app.innerHTML = `<div class="auth-wrap"><div class="auth-card">${brand()}<h1>${esc(title)}</h1><p>${esc(description)}</p>${content}</div></div>`;
+  app.innerHTML = `<div class="auth-wrap"><div class="auth-card"><div class="auth-head">${brand()}<button class="theme-toggle" data-action="toggle-theme" aria-label="Сменить тему">${theme==='dark'?'☀':'◐'}</button></div><h1>${esc(title)}</h1><p>${esc(description)}</p>${content}</div></div>`;
 }
 function loginScreen(mode = 'password') {
   if (mode === 'link') {
@@ -144,6 +154,31 @@ async function run(task, success) {
   } finally { busy = false; }
 }
 function checked(result) { if (result.error) throw result.error; return result.data; }
+async function loadSalesHistory(append=false) {
+  if (!staff || staff.role!=='manager' || historyLoading) return;
+  historyLoading=true;
+  const offset=append?historyOffset:0;
+  try {
+    const rows=checked(await supabase.rpc('gl_search_sales_history',{
+      search_text:historyQuery.trim(),search_date:historyDate||null,
+      oldest_first:historyOldestFirst,page_offset:offset,page_size:26,
+    }));
+    if(append)salesHistory.push(...rows.slice(0,25));
+    else salesHistory=rows.slice(0,25);
+    historyOffset=offset+Math.min(rows.length,25);
+    historyHasMore=rows.length>25;
+    if(activeTab==='sales' && !document.activeElement?.closest('#historySearch')) render();
+    else updateHistoryResults();
+  } catch(error) { console.error(error);toast('Историю передач не удалось загрузить'); }
+  finally { historyLoading=false; }
+}
+function historyResultsMarkup() {
+  return `${salesHistory.length?salesHistory.map(x=>productOrderItem(x,'manager')).join(''):empty('Совпадений нет','Проверьте имя, код или дату.')}${historyHasMore?`<div class="history-more">${button('Показать ещё','history-more','','btn-sm')}</div>`:''}`;
+}
+function updateHistoryResults() {
+  const el=document.querySelector('#historyResults');
+  if(el)el.innerHTML=historyResultsMarkup();
+}
 async function refresh() {
   if (refreshing) { queuedRefresh = true; return; }
   refreshing = true;
@@ -167,7 +202,16 @@ async function refresh() {
     const results = await Promise.all(queries.map(async ([key, table, columns]) => [key, checked(await supabase.from(table).select(columns).limit(1000))]));
     for (const [key, value] of results) records[key] = value;
     if (staff.role === 'logistics') syncGps();
-    if (!document.querySelector('#activeDialog') && !document.activeElement?.closest('#saleForm,#staffForm,#storeForm')) render();
+    if (staff.role==='barista' && records.containers.length) {
+      const incoming=records.containers.filter(x=>x.store_id===staff.store_id&&x.status==='assigned');
+      const seenKey=`gl_incoming_${user.id}`;
+      const seen=new Set(JSON.parse(sessionStorage.getItem(seenKey)||'[]'));
+      const arrived=incoming.find(x=>!seen.has(x.id));
+      if(arrived && sessionStorage.getItem(seenKey)!==null) toast(`Логист направляется за заявкой ${arrived.code}`);
+      sessionStorage.setItem(seenKey,JSON.stringify(incoming.map(x=>x.id)));
+    }
+    if (staff.role==='manager' && activeTab==='sales' && !historyLoading) void loadSalesHistory(false);
+    if (!document.querySelector('#activeDialog') && !document.activeElement?.closest('#saleForm,#staffForm,#storeForm,#historySearch')) render();
   } catch (error) { console.error(error); toast(`Не удалось обновить данные: ${error.message}`); }
   finally { refreshing = false; if (queuedRefresh) { queuedRefresh = false; void refresh(); } }
 }
@@ -246,9 +290,9 @@ function containerItem(item, role) {
   let actions = '';
   if (role === 'barista') {
     actions = `${button('Показать QR', 'qr', `data-id="${item.id}"`, 'btn-sm')}`;
-    if (item.created_by === user.id && ['ready','hold','rejected'].includes(item.status)) {
+    if (item.store_id === staff.store_id && ['ready','hold','rejected'].includes(item.status)) {
       actions += `${button('Исправить', 'edit-container', `data-id="${item.id}"`, 'btn-sm')}${button('Отменить заявку', 'cancel-container', `data-id="${item.id}"`, 'btn-sm btn-danger')}`;
-    } else if (item.created_by === user.id && item.status === 'assigned') {
+    } else if (item.store_id === staff.store_id && item.status === 'assigned') {
       actions += button('Отменить заявку', 'cancel-container', `data-id="${item.id}"`, 'btn-sm btn-danger');
     }
   }
@@ -268,13 +312,14 @@ function containerItem(item, role) {
 function renderBarista() {
   const own = records.containers.filter(x => x.store_id === staff.store_id).sort(byNewest);
   const ready = own.filter(x => x.status === 'ready');
+  const incoming = own.filter(x => x.status === 'assigned');
   const current = own.filter(x => !archivedContainer(x));
   const archive = own.filter(archivedContainer);
   const nav = tabs([['requests','Заявки'],['map','Карта'],['archive','Архив']]);
   let body = nav;
   if (activeTab === 'map') body += mapWorkspace('barista');
   else if (activeTab === 'archive') body += `<section class="card"><div class="card-head"><h2>Архив заявок</h2></div>${archive.length ? archive.map(x=>containerItem(x,'barista')).join('') : empty('Архив пока пуст','Завершённые и отменённые заявки переходят сюда через 24 часа.')}</section>`;
-  else body += `<section class="stats compact-stats">${stat('Готовы к вывозу',ready.length,`${number(ready.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`)}${stat('У логиста',own.filter(x=>['assigned','picked_up'].includes(x.status)).length)}${stat('Заявки в работе',current.length)}</section><section class="card"><div class="card-head"><h2>Заявки точки</h2></div>${current.length ? current.map(x=>containerItem(x,'barista')).join('') : empty('Заявок нет','Новая заявка появится здесь после взвешивания.')}</section>`;
+  else body += `${incoming.length?`<div class="arrival-banner"><span class="arrival-pulse"></span><div><strong>Логист едет к вашей точке</strong><small>${incoming.map(x=>esc(x.code)).join(', ')} · положение и время прибытия на карте</small></div>${button('Открыть карту','tab','data-id="map"','btn-sm')}</div>`:''}<section class="stats compact-stats">${stat('Готовы к вывозу',ready.length,`${number(ready.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`)}${stat('У логиста',own.filter(x=>['assigned','picked_up'].includes(x.status)).length)}${stat('Заявки в работе',current.length)}</section><section class="card"><div class="card-head"><h2>Заявки точки</h2></div>${current.length ? current.map(x=>containerItem(x,'barista')).join('') : empty('Заявок нет','Новая заявка появится здесь после взвешивания.')}</section>`;
   shell('Сбор на точке', activeTab === 'map' ? 'Рейсы, которые забирают заявки вашей точки.' : '', activeTab === 'requests' ? button('Новая заявка','new-container','','btn-primary') : '', body);
 }
 
@@ -333,79 +378,122 @@ function selectedTrip() {
   const trips = visibleMapTrips();
   return trips.find(x=>x.id===selectedMapTrip) || trips[0] || null;
 }
+function mapTargets(trip, role) {
+  const containers = records.containers.filter(x =>
+    trip ? x.trip_id===trip.id && ['assigned','picked_up'].includes(x.status)
+      : x.status==='ready' && (role!=='barista'||x.store_id===staff.store_id));
+  const deliveries = role==='barista' ? [] : records.sales.filter(x=>
+    x.fulfillment==='delivery' && (trip ? x.delivery_trip_id===trip.id && ['assigned','out_for_delivery'].includes(x.delivery_status) : x.delivery_status==='ready'));
+  return [
+    ...containers.map(x=>({id:x.id,code:x.code,label:storeName(x.store_id),address:storeAddress(x.store_id),status:x.status,point:mapPoint(records.stores.find(s=>s.id===x.store_id)?.latitude,records.stores.find(s=>s.id===x.store_id)?.longitude),type:'container'})),
+    ...deliveries.map(x=>({id:x.id,code:x.order_code,label:x.customer_name,address:x.delivery_address,status:x.delivery_status,point:mapPoint(x.latitude,x.longitude),type:'sale'})),
+  ];
+}
+function selectedTarget(trip,role) {
+  const targets=mapTargets(trip,role);
+  return targets.find(x=>x.id===selectedMapRequest) || targets.find(x=>['assigned','out_for_delivery','ready'].includes(x.status)) || targets[0] || null;
+}
 function mapWorkspace(role) {
   const trips = visibleMapTrips();
   const chosen = selectedTrip();
-  const collections = chosen ? records.containers.filter(x=>x.trip_id===chosen.id&&['assigned','picked_up'].includes(x.status)) : records.containers.filter(x=>x.status==='ready'&&(role!=='barista'||x.store_id===staff.store_id));
-  const grouped = [...new Set(collections.map(x=>x.store_id))].map(id=>({store:records.stores.find(s=>s.id===id),items:collections.filter(x=>x.store_id===id)}));
+  const targets=mapTargets(chosen,role);
+  const target=selectedTarget(chosen,role);
   const gps = chosen ? positionFor(chosen.id) : null;
   const fresh = gps && ageMs(gps.updated_at)<120000;
   const choices = trips.length>1 ? `<div class="trip-choices">${trips.map(t=>`<button class="trip-choice ${chosen?.id===t.id?'selected':''}" data-action="select-map-trip" data-id="${t.id}"><strong>${esc(t.driver_name)}</strong><span>${esc(t.code)}</span></button>`).join('')}</div>` : '';
-  const stops = grouped.map(({store,items},i)=>`<button class="map-stop" type="button" data-action="focus-map" data-lat="${store?.latitude??''}" data-lon="${store?.longitude??''}"><span class="stop-number">${i+1}</span><span class="map-stop-copy"><strong>${esc(store?.name||items[0].store_id)}</strong><small>${esc(store?.address||'Точный адрес не указан')} · ${chosen?`${items.filter(x=>x.status==='assigned').length} к вывозу · ${items.filter(x=>x.status==='picked_up').length} забрано`:`${items.length} ${word(items.length,'заявка','заявки','заявок')}`}</small></span><span class="stop-arrow" aria-hidden="true">↗</span></button>`).join('');
-  const deliveries = role==='logistics' ? records.sales.filter(x=>x.fulfillment==='delivery'&&x.delivery_trip_id===chosen?.id&&['assigned','out_for_delivery'].includes(x.delivery_status)).map(x=>`<div class="map-stop"><span class="stop-number">↗</span><div><strong>${esc(x.customer_name)}</strong><small>${esc(x.delivery_address)}</small></div></div>`).join('') : '';
-  return `<div class="map-layout"><section class="card map-card"><div class="map-toolbar"><div class="map-toolbar-main"><strong>${chosen?esc(chosen.driver_name+' · '+chosen.code):'Карта точек и рейсов'}</strong><span>${gps?`${fresh?'Геопозиция обновлена':'Последняя геопозиция'} · ${dateTime(gps.updated_at)}`:`Шымкент · ${records.stores.filter(s=>s.active).length} точек`}</span></div><div class="map-styles" role="group" aria-label="Вид карты"><button type="button" class="map-style ${mapStyle==='streets'?'selected':''}" data-action="map-style" data-id="streets">Улицы</button><button type="button" class="map-style ${mapStyle==='imagery'?'selected':''}" data-action="map-style" data-id="imagery">Спутник</button></div></div><div id="operationsMap" class="operations-map" role="img" aria-label="Карта заявок и рейсов"></div><div class="map-foot"><span id="routeMeta">${grouped.length?'Остановок: '+grouped.length:'Нет остановок с заявками'}</span><span class="map-legend"><i></i>Точка сбора <i></i>Логист</span></div></section><aside class="card route-panel"><div class="card-head"><div><h2>Остановки</h2><p>${chosen?esc(chosen.code):'Заявки к вывозу'}</p></div><span class="route-count">${grouped.length}</span></div><div class="card-body">${choices}${stops||empty('Остановок нет','Заявки появятся здесь автоматически.')}${deliveries}</div></aside></div>`;
+  const stops = targets.map((item,i)=>`<button class="map-stop ${target?.id===item.id?'selected':''}" type="button" data-action="select-map-request" data-id="${item.id}"><span class="stop-number">${i+1}</span><span class="map-stop-copy"><strong>${esc(item.code)} · ${esc(item.label)}</strong><small>${esc(item.address||'Точка на карте не отмечена')} · ${esc(statuses[item.status]?.[0]||item.status)}</small></span><span class="stop-arrow" aria-hidden="true">↗</span></button>`).join('');
+  return `<div class="map-layout"><section class="card map-card"><div class="map-toolbar"><div class="map-toolbar-main"><strong>${target?`${esc(target.code)} · ${esc(target.label)}`:chosen?esc(chosen.driver_name+' · '+chosen.code):'Карта заявок'}</strong><span>${chosen?`${esc(chosen.driver_name)} · ${fresh?'GPS сейчас':gps?'GPS устарел':'GPS ещё не передан'}`:`Шымкент · ${records.stores.filter(s=>s.active).length} точек`}</span></div><div class="map-styles" role="group" aria-label="Вид карты"><button type="button" class="map-style ${mapStyle==='roadmap'?'selected':''}" data-action="map-style" data-id="roadmap">Карта</button><button type="button" class="map-style ${mapStyle==='satellite'?'selected':''}" data-action="map-style" data-id="satellite">Спутник</button></div></div><div id="operationsMap" class="operations-map" role="img" aria-label="Карта заявок и рейсов"></div><div class="map-foot"><span id="routeMeta">${target?fresh?'Рассчитываем время прибытия…':'Для времени прибытия нужен GPS логиста':'Выберите заявку'}</span><span class="map-legend"><i></i>Точка <i></i>Логист</span></div></section><aside class="card route-panel"><div class="card-head"><div><h2>Заявки на карте</h2><p>${chosen?esc(chosen.code):'Ожидают вывоза'}</p></div><span class="route-count">${targets.length}</span></div><div class="card-body">${choices}${stops||empty('Заявок нет','Новые заявки появятся здесь.')}</div></aside></div>`;
 }
 function mapPoint(lat,lon) { return lat!==null&&lon!==null&&lat!==''&&lon!==''&&Number.isFinite(Number(lat))&&Number.isFinite(Number(lon)) ? [Number(lat),Number(lon)] : null; }
-function routeStops(trip) {
-  const ids = [...new Set(records.containers.filter(c=>c.trip_id===trip.id&&c.status==='assigned').map(c=>c.store_id))];
-  const stores=ids.map(id=>records.stores.find(s=>s.id===id)).filter(s=>s&&mapPoint(s.latitude,s.longitude));
-  const deliveries=records.sales.filter(x=>x.delivery_trip_id===trip.id&&['assigned','out_for_delivery'].includes(x.delivery_status)&&mapPoint(x.latitude,x.longitude));
-  return [...stores,...deliveries];
+let googlePromise;
+function loadGoogleMaps() {
+  if (!GOOGLE_MAPS_BROWSER_KEY) return Promise.reject(new Error('Google Maps key missing'));
+  if (window.google?.maps?.importLibrary) return Promise.resolve(window.google.maps);
+  if (googlePromise) return googlePromise;
+  googlePromise = new Promise((resolve,reject)=>{
+    const timeout=setTimeout(()=>reject(new Error('Google Maps did not load')),12000);
+    window.__glMapsReady=()=>{clearTimeout(timeout);resolve(window.google.maps);};
+    const script=document.createElement('script');
+    script.src=`https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_BROWSER_KEY)}&v=weekly&loading=async&callback=__glMapsReady`;
+    script.async=true;
+    script.onerror=()=>{clearTimeout(timeout);reject(new Error('Google Maps unavailable'));};
+    document.head.append(script);
+  });
+  return googlePromise;
 }
+const darkMapStyles=[
+  {elementType:'geometry',stylers:[{color:'#1c2925'}]},
+  {elementType:'labels.text.fill',stylers:[{color:'#c9d6cf'}]},
+  {elementType:'labels.text.stroke',stylers:[{color:'#1c2925'}]},
+  {featureType:'road',elementType:'geometry',stylers:[{color:'#40564a'}]},
+  {featureType:'water',elementType:'geometry',stylers:[{color:'#12212b'}]},
+];
 async function drawOperationsMap() {
-  const element = document.querySelector('#operationsMap');
-  if (!element || !staff) return;
-  const firstStore = records.stores.find(s=>s.active&&mapPoint(s.latitude,s.longitude));
-  const map = L.map(element,{zoomControl:true,scrollWheelZoom:false}).setView(firstStore ? mapPoint(firstStore.latitude,firstStore.longitude) : [42.323,69.595],12);
-  activeMap = map;
-  activeBaseLayer = basemap(map);
-  const bounds=[];
-  const role=staff.role, chosen=selectedTrip();
-  const visibleIds = role==='barista' ? [staff.store_id] : records.stores.filter(s=>s.active).map(s=>s.id);
-  for (const store of records.stores.filter(s=>visibleIds.includes(s.id))) {
-    const point=mapPoint(store.latitude,store.longitude);
-    if (!point) continue;
-    const count=records.containers.filter(c=>c.store_id===store.id&&['ready','assigned','picked_up'].includes(c.status)).length;
-    L.marker(point,{icon:L.divIcon({className:'map-marker',html:`<span class="store-marker ${count?'has-work':''}">${visibleIds.indexOf(store.id)+1}</span>`,iconSize:[36,36],iconAnchor:[18,18]})})
-      .bindPopup(`<strong>${esc(store.name)}</strong><br>${esc(store.address||'Адрес не указан')}<br>${count} ${word(count,'заявка','заявки','заявок')}`).addTo(map);
-    bounds.push(point);
+  const element=document.querySelector('#operationsMap');
+  if(!element||!staff)return;
+  const role=staff.role,trip=selectedTrip(),target=selectedTarget(trip,role);
+  const gps=trip&&positionFor(trip.id);
+  const driver=gps&&mapPoint(gps.latitude,gps.longitude);
+  const fresh=gps&&ageMs(gps.updated_at)<120000;
+  const firstStore=records.stores.find(s=>s.active&&mapPoint(s.latitude,s.longitude));
+  const center=target?.point||driver||(firstStore&&mapPoint(firstStore.latitude,firstStore.longitude))||[42.323,69.595];
+  let maps;
+  try { maps=await loadGoogleMaps(); }
+  catch(error) { if(element.isConnected) drawImageryFallback(element,center,trip,target,driver); return; }
+  if(!element.isConnected)return;
+  const map=new maps.Map(element,{center:{lat:center[0],lng:center[1]},zoom:13,mapTypeId:mapStyle,mapTypeControl:false,streetViewControl:false,fullscreenControl:false,gestureHandling:'greedy',styles:theme==='dark'&&mapStyle==='roadmap'?darkMapStyles:[]});
+  activeMap=map;
+  const bounds=new maps.LatLngBounds();
+  const visibleIds=role==='barista'?[staff.store_id]:records.stores.filter(s=>s.active).map(s=>s.id);
+  for(const store of records.stores.filter(s=>visibleIds.includes(s.id))){
+    const point=mapPoint(store.latitude,store.longitude);if(!point)continue;
+    const position={lat:point[0],lng:point[1]};
+    new maps.Marker({map,position,title:`${store.name} · ${store.address||''}`,label:{text:String(visibleIds.indexOf(store.id)+1),color:'#ffffff',fontWeight:'bold'},icon:{path:maps.SymbolPath.CIRCLE,scale:17,fillColor:'#176b42',fillOpacity:1,strokeColor:'#ffffff',strokeWeight:3}});
+    bounds.extend(position);
   }
-  const trips=visibleMapTrips();
-  for(const trip of trips){
-    const pos=positionFor(trip.id),point=pos&&mapPoint(pos.latitude,pos.longitude);
-    if(!point)continue;
-    const current=ageMs(pos.updated_at)<120000;
-    L.marker(point,{icon:L.divIcon({className:'map-marker',html:`<span class="driver-marker ${current?'online':''}">↗</span>`,iconSize:[40,40],iconAnchor:[20,20]})})
-      .bindPopup(`<strong>${esc(trip.driver_name)}</strong><br>${current?'GPS сейчас':'Последнее положение'} · ${dateTime(pos.updated_at)}<br>${esc(trip.code)}`).addTo(map);
-    bounds.push(point);
+  for(const t of visibleMapTrips()){
+    const pos=positionFor(t.id),point=pos&&mapPoint(pos.latitude,pos.longitude);if(!point)continue;
+    const position={lat:point[0],lng:point[1]};
+    new maps.Marker({map,position,title:`${t.driver_name} · ${ageMs(pos.updated_at)<120000?'GPS сейчас':'Последняя геопозиция '+dateTime(pos.updated_at)}`,icon:{path:maps.SymbolPath.FORWARD_CLOSED_ARROW,scale:6,rotation:45,fillColor:ageMs(pos.updated_at)<120000?'#1677b9':'#85938c',fillOpacity:1,strokeColor:'#ffffff',strokeWeight:2}});
+    bounds.extend(position);
   }
-  if(role==='logistics')for(const order of records.sales.filter(x=>x.fulfillment==='delivery'&&x.delivery_trip_id===chosen?.id&&['assigned','out_for_delivery'].includes(x.delivery_status))){
-    const point=mapPoint(order.latitude,order.longitude);if(!point)continue;
-    L.marker(point,{icon:L.divIcon({className:'map-marker',html:'<span class="delivery-marker">◆</span>',iconSize:[36,36],iconAnchor:[18,18]})})
-      .bindPopup(`<strong>${esc(order.customer_name)}</strong><br>${esc(order.delivery_address)}`).addTo(map);bounds.push(point);
+  if(target?.point)bounds.extend({lat:target.point[0],lng:target.point[1]});
+  if(!bounds.isEmpty())map.fitBounds(bounds,42);
+  if(!target?.point){setRouteMeta('У заявки пока нет точной метки');return;}
+  if(!driver||!fresh){setRouteMeta(gps?'GPS логиста устарел':'Логист ещё не передаёт GPS');return;}
+  if(['picked_up'].includes(target.status)){setRouteMeta('Контейнер уже забран');return;}
+  try {
+    const cacheKey=`${trip.id}:${target.id}:${driver.map(x=>x.toFixed(3)).join(',')}`;
+    let result=routeCache.get(cacheKey);
+    if(!result||Date.now()-result.at>60000){
+      const {Route}=await maps.importLibrary('routes');
+      const response=await Route.computeRoutes({origin:{lat:driver[0],lng:driver[1]},destination:{lat:target.point[0],lng:target.point[1]},travelMode:'DRIVING',fields:['path','distanceMeters','durationMillis']});
+      const route=response.routes?.[0];
+      if(!route)throw new Error('Route unavailable');
+      result={path:route.path,distance:route.distanceMeters,duration:route.durationMillis,at:Date.now()};
+      routeCache.set(cacheKey,result);
+      if(routeCache.size>40)routeCache.delete(routeCache.keys().next().value);
+    }
+    if(activeMap!==map)return;
+    const line=new maps.Polyline({path:result.path,geodesic:false,strokeColor:'#176b42',strokeWeight:5,strokeOpacity:.9,map});
+    map.fitBounds(line.getBounds?.()||bounds,42);
+    setRouteMeta(`Прибытие через ~${Math.max(1,Math.ceil(result.duration/60000))} мин · ${number(result.distance/1000,1)} км`);
+  } catch(error) {
+    console.warn('Route unavailable',error);
+    if(activeMap===map)setRouteMeta('Расчёт маршрута сейчас недоступен');
   }
-  if(bounds.length)map.fitBounds(bounds,{padding:[36,36],maxZoom:14});
+}
+function setRouteMeta(value) { const el=document.querySelector('#routeMeta');if(el)el.textContent=value; }
+function drawImageryFallback(element,center,trip,target,driver) {
+  const map=L.map(element,{zoomControl:true,scrollWheelZoom:false}).setView(center,13);
+  activeMap=map; activeBaseLayer=basemap(map);
+  for(const store of records.stores.filter(s=>staff.role!=='barista'||s.id===staff.store_id)){
+    const point=mapPoint(store.latitude,store.longitude);if(point)L.marker(point).bindPopup(`${esc(store.name)}<br>${esc(store.address||'')}`).addTo(map);
+  }
+  if(driver)L.circleMarker(driver,{radius:10,color:'#fff',fillColor:'#1677b9',fillOpacity:1}).bindPopup(esc(trip?.driver_name)).addTo(map);
+  if(target?.point&&driver)map.fitBounds([target.point,driver],{padding:[36,36]});
+  setRouteMeta('Карта Google недоступна; расчёт прибытия выключен');
   setTimeout(()=>{if(activeMap===map)map.invalidateSize();},100);
-  const position=chosen&&positionFor(chosen.id);
-  const start=position&&mapPoint(position.latitude,position.longitude);
-  const stops=chosen?routeStops(chosen):[];
-  if(!start||!stops.length)return;
-  const coordinates=[start,...stops.map(s=>mapPoint(s.latitude,s.longitude))];
-  const url=`https://router.project-osrm.org/route/v1/driving/${coordinates.map(([lat,lon])=>`${lon},${lat}`).join(';')}?overview=full&geometries=geojson&steps=false`;
-  try{
-    const response=await fetch(url,{signal:AbortSignal.timeout(8000)});
-    const data=await response.json();
-    if(!response.ok||data.code!=='Ok'||!data.routes?.[0])throw Error('Маршрут не найден');
-    if(activeMap!==map)return;
-    const line=L.geoJSON(data.routes[0].geometry,{style:{color:'#176944',weight:5,opacity:.8}}).addTo(map);
-    map.fitBounds(line.getBounds(),{padding:[34,34]});
-    const meta=document.querySelector('#routeMeta');
-    if(meta)meta.textContent=`По дорогам: ${number(data.routes[0].distance/1000,1)} км · около ${Math.round(data.routes[0].duration/60)} мин`;
-  }catch{
-    if(activeMap!==map)return;
-    L.polyline(coordinates,{color:'#176944',weight:3,dashArray:'7 7',opacity:.7}).addTo(map);
-    const meta=document.querySelector('#routeMeta');if(meta)meta.textContent='Показан порядок остановок; дорожный маршрут сейчас недоступен';
-  }
 }
 function renderLogistics() {
   const trip = myTrip();
@@ -556,7 +644,6 @@ function renderManagement() {
   if (activeTab==='overview') {
     const liveTrip=records.trips.filter(x=>x.status==='active');
     body += `<section class="stats">${stat('Сырьё в системе',`${number(activeContainers.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`,`${activeContainers.length} контейнеров`)}${stat('В пути',records.containers.filter(x=>['assigned','picked_up'].includes(x.status)).length)}${stat('Произведено',`${produced} уп.`)}${stat('Выручка',money(revenue),`${sold} уп. передано`)}</section><div class="overview-grid"><section class="card"><div class="card-head"><h2>Работа сегодня</h2></div><div class="flow-list"><div><span>Готово на точках</span><strong>${records.containers.filter(x=>x.status==='ready').length}</strong></div><div><span>Рейсы в работе</span><strong>${liveTrip.length}</strong></div><div><span>Ожидает приёмки</span><strong>${records.containers.filter(x=>x.status==='picked_up').length}</strong></div><div><span>Партии в производстве</span><strong>${records.batches.filter(x=>x.status!=='complete').length}</strong></div><div><span>Заказы продукта</span><strong>${records.sales.filter(x=>!['delivered','cancelled'].includes(x.delivery_status)).length}</strong></div></div></section><section class="card"><div class="card-head"><h2>Активные рейсы</h2>${button('Открыть карту','tab',`data-id="map"`,'btn-sm')}</div>${liveTrip.length?liveTrip.map(t=>`<div class="item"><div class="item-title">${esc(t.driver_name)}</div><div class="item-sub mono">${esc(t.code)} · ${records.containers.filter(c=>c.trip_id===t.id&&['assigned','picked_up'].includes(c.status)).length} заявок</div><div class="item-sub">${positionFor(t.id)?`GPS · ${dateTime(positionFor(t.id).updated_at)}`:'GPS не передан'}</div></div>`).join(''):empty('Рейсов нет','Новые рейсы появятся здесь.')}</section></div>`;
-    body += mapWorkspace('manager');
   } else if (activeTab==='map') {
     body += mapWorkspace('manager');
   } else if (activeTab==='journal') {
@@ -570,16 +657,9 @@ function renderManagement() {
   } else if (activeTab==='sales') {
     const available=records.batches.filter(b=>b.status==='complete'&&b.produced_packs-records.sales.filter(s=>s.batch_id===b.id&&s.delivery_status!=='cancelled').reduce((sum,s)=>sum+s.packs,0)>0);
     const current=records.sales.filter(x=>!['delivered','cancelled'].includes(x.delivery_status)).sort(byNewest);
-    const history=records.sales.filter(x=>['delivered','cancelled'].includes(x.delivery_status)).sort(byNewest);
-    body += `<section class="stats compact-stats">${stat('Готово',`${produced} уп.`)}${stat('Зарезервировано',`${reserved-sold} уп.`)}${stat('Передано',`${sold} уп.`)}${stat('Выручка',money(revenue))}</section><div class="grid"><section class="card"><div class="card-head"><h2>Заявки на продукт</h2></div>${current.length?current.map(x=>productOrderItem(x,'manager')).join(''):empty('Активных заявок нет','Создайте заявку из готовой партии.')}<div class="card-head"><h2>История передач</h2></div>${history.length?history.slice(0,25).map(x=>productOrderItem(x,'manager')).join(''):empty('Передач пока нет','Подтверждённые передачи появятся здесь.')}</section><aside class="card"><div class="card-head"><h2>Новая заявка</h2></div><div class="card-body"><form id="saleForm" class="form"><label class="field">Покупатель<input name="customer_name" required minlength="2" maxlength="120" placeholder="Компания или имя"></label><label class="field">Готовая партия<select name="batch_id" required>${available.map(b=>`<option value="${b.id}">${esc(b.code)} · ${b.produced_packs-records.sales.filter(s=>s.batch_id===b.id&&s.delivery_status!=='cancelled').reduce((sum,s)=>sum+s.packs,0)} уп.</option>`).join('')}</select></label><label class="field">Упаковок<input name="packs" type="number" min="1" step="1" inputmode="numeric" required></label><label class="field">Цена за упаковку, ₸<input name="unit_price" type="number" min="0" step="1" inputmode="numeric" required></label><label class="field">Передача<select name="fulfillment"><option value="pickup">Самовывоз</option><option value="delivery">Доставка логистом</option></select></label><label class="field">Адрес доставки<input name="delivery_address" maxlength="200" placeholder="Город, улица, дом"></label><input type="hidden" name="latitude"><input type="hidden" name="longitude"><button class="btn" type="button" data-action="delivery-pin">Указать точку доставки на карте</button><label class="field">Канал<select name="channel"><option>Кофейня</option><option>Партнёрская точка</option><option>Прямой заказ</option></select></label><button class="btn btn-primary" type="submit" ${available.length?'':'disabled'}>Создать заявку</button></form></div></aside></div>`;
+    body += `<section class="stats compact-stats">${stat('Готово',`${produced} уп.`)}${stat('Зарезервировано',`${reserved-sold} уп.`)}${stat('Передано',`${sold} уп.`)}${stat('Выручка',money(revenue))}</section><div class="grid"><section class="card"><div class="card-head"><h2>Заявки на продукт</h2></div>${current.length?current.map(x=>productOrderItem(x,'manager')).join(''):empty('Активных заявок нет','Создайте заявку из готовой партии.')}<div class="card-head"><h2>История передач</h2></div><form id="historySearch" class="history-search" autocomplete="off"><label>Поиск<input name="query" type="search" placeholder="Имя или код" value="${esc(historyQuery)}"></label><label>Дата<input name="date" type="date" value="${esc(historyDate)}"></label><label>Порядок<select name="sort"><option value="new" ${historyOldestFirst?'':'selected'}>Сначала новые</option><option value="old" ${historyOldestFirst?'selected':''}>Сначала старые</option></select></label></form><div id="historyResults">${historyResultsMarkup()}</div></section><aside class="card"><div class="card-head"><h2>Новая заявка</h2></div><div class="card-body"><form id="saleForm" class="form"><label class="field">Покупатель<input name="customer_name" required minlength="2" maxlength="120" placeholder="Компания или имя"></label><label class="field">Готовая партия<select name="batch_id" required>${available.map(b=>`<option value="${b.id}">${esc(b.code)} · ${b.produced_packs-records.sales.filter(s=>s.batch_id===b.id&&s.delivery_status!=='cancelled').reduce((sum,s)=>sum+s.packs,0)} уп.</option>`).join('')}</select></label><label class="field">Упаковок<input name="packs" type="number" min="1" step="1" inputmode="numeric" required></label><label class="field">Цена за упаковку, ₸<input name="unit_price" type="number" min="0" step="1" inputmode="numeric" required></label><label class="field">Передача<select name="fulfillment"><option value="pickup">Самовывоз</option><option value="delivery">Доставка логистом</option></select></label><label class="field">Адрес доставки<input name="delivery_address" maxlength="200" placeholder="Город, улица, дом"></label><input type="hidden" name="latitude"><input type="hidden" name="longitude"><button class="btn" type="button" data-action="delivery-pin">Указать точку доставки на карте</button><label class="field">Канал<select name="channel"><option>Кофейня</option><option>Партнёрская точка</option><option>Прямой заказ</option></select></label><button class="btn btn-primary" type="submit" ${available.length?'':'disabled'}>Создать заявку</button></form></div></aside></div>`;
   }
   shell(({overview:'Операционный обзор',map:'Карта рейсов',sales:'Заказы продукта',journal:'Журнал операций',staff:'Команда',stores:'Точки сбора'})[activeTab], '', '', body);
-  if(activeTab==='overview'){
-    const main=app.querySelector('.workspace-main');
-    const stats=main?.querySelector(':scope > .stats');
-    const map=main?.querySelector(':scope > .map-layout');
-    if(stats&&map)stats.after(map);
-  }
 }
 function eventLabel(action, entity) { const subject=({gl_containers:'Заявка',gl_trips:'Рейс',gl_batches:'Партия',gl_sales:'Продукт'})[entity]||'Операция'; return `${subject}: ${({created:'создано',updated:'исправлено',ready:'готово',hold:'удержано',rejected:'отклонено',cancelled:'отменено',assigned:'назначено',picked_up:'вывоз подтверждён',received:'принято в цех',batched:'включено в партию',drying:'сушка начата',production:'вес подтверждён',complete:'выпуск завершён',completed:'завершён',out_for_delivery:'в доставке',delivered:'передано покупателю'})[action]||action}`; }
 function render() { if (!staff) return; if (staff.role==='barista') renderBarista(); else if (staff.role==='logistics') renderLogistics(); else if (staff.role==='production') renderProduction(); else renderManagement(); }
@@ -650,8 +730,8 @@ async function action(event) {
   if (!el) return;
   const {action: name,id}=el.dataset;
   if (name==='close-modal') return closeModal();
-  if (name==='map-style' && ['streets','imagery'].includes(id) && activeMap) { mapStyle=id; localStorage.setItem('gl_map_style',id); if(activeBaseLayer)activeMap.removeLayer(activeBaseLayer); activeBaseLayer=basemap(activeMap,id); document.querySelectorAll('.map-style').forEach(x=>x.classList.toggle('selected',x.dataset.id===id)); return; }
-  if (name==='focus-map' && activeMap) { const point=mapPoint(el.dataset.lat,el.dataset.lon); if(point)activeMap.flyTo(point,16,{duration:.35}); return; }
+  if (name==='toggle-theme') { theme=theme==='dark'?'light':'dark';localStorage.setItem('gl_theme',theme);document.body.dataset.theme=theme;if(staff)render();else loginScreen();return; }
+  if (name==='map-style' && ['roadmap','satellite'].includes(id) && activeMap) { mapStyle=id; localStorage.setItem('gl_map_style',id); if(activeMap.setMapTypeId){activeMap.setMapTypeId(id);activeMap.setOptions({styles:theme==='dark'&&id==='roadmap'?darkMapStyles:[]});} document.querySelectorAll('.map-style').forEach(x=>x.classList.toggle('selected',x.dataset.id===id)); return; }
   if (name==='reload') return location.reload();
   if (name==='link-login') return loginScreen('link');
   if (name==='password-login') return loginScreen();
@@ -661,10 +741,12 @@ async function action(event) {
   if (name==='journal-filter' && staff.role==='manager' && ['all','cancelled'].includes(id)) { journalFilter=id; render(); return; }
   if (name==='tab') {
     const allowed={barista:['requests','map','archive'],logistics:['requests','map','deliveries','archive'],production:['intake','batches','dispatch','archive'],manager:['overview','map','sales','journal','staff','stores']}[staff.role];
-    if(allowed.includes(id)&&(staff.role!=='manager'||staff.can_manage_access||!['staff','stores'].includes(id))){activeTab=id;render();}
+    if(allowed.includes(id)&&(staff.role!=='manager'||staff.can_manage_access||!['staff','stores'].includes(id))){activeTab=id;render();if(id==='sales')void loadSalesHistory(false);}
     return;
   }
-  if(name==='select-map-trip'){selectedMapTrip=id;render();return;}
+  if(name==='select-map-trip'){selectedMapTrip=id;selectedMapRequest=null;render();return;}
+  if(name==='select-map-request'){selectedMapRequest=id;render();return;}
+  if(name==='history-more'&&staff.role==='manager'){void loadSalesHistory(true);return;}
   if(name==='dismiss-notice'&&staff.role==='logistics'){
     const key=`gl_seen_notices_${user.id}`,seen=new Set(JSON.parse(localStorage.getItem(key)||'[]'));
     seen.add(id);localStorage.setItem(key,JSON.stringify([...seen].slice(-100)));render();return;
@@ -676,8 +758,8 @@ async function action(event) {
   if (staff.role==='barista') {
     if (name==='new-container') return openContainerForm();
     if (name==='qr'&&item) return void qrDialog(item);
-    if (name==='edit-container'&&item&&item.created_by===user.id) return openContainerForm(item);
-    if (name==='cancel-container'&&item&&item.created_by===user.id) return cancelContainer(item);
+    if (name==='edit-container'&&item&&item.store_id===staff.store_id) return openContainerForm(item);
+    if (name==='cancel-container'&&item&&item.store_id===staff.store_id) return cancelContainer(item);
   }
   if (staff.role==='logistics') {
     if (name==='start-trip') return void run(async()=>checked(await supabase.from('gl_trips').insert({}).select().single()),'Рейс начат');
@@ -711,7 +793,18 @@ async function action(event) {
 }
 function stopGpsOnLogout() { if (watchId!==null&&navigator.geolocation) navigator.geolocation.clearWatch(watchId); watchId=null; }
 document.addEventListener('click',event=>{void action(event);});
-document.addEventListener('change',event=>{if(event.target.name==='fulfillment')syncDeliveryField();});
+function updateHistorySearch(form) {
+  historyQuery=form.elements.query.value;
+  historyDate=form.elements.date.value;
+  historyOldestFirst=form.elements.sort.value==='old';
+  clearTimeout(historyTimer);
+  historyTimer=setTimeout(()=>void loadSalesHistory(false),280);
+}
+document.addEventListener('input',event=>{if(event.target.closest('#historySearch'))updateHistorySearch(event.target.form);});
+document.addEventListener('change',event=>{
+  if(event.target.name==='fulfillment')syncDeliveryField();
+  if(event.target.closest('#historySearch'))updateHistorySearch(event.target.form);
+});
 document.addEventListener('submit',event=>{
   if (event.target.id==='loginForm') {
     event.preventDefault();
