@@ -248,7 +248,7 @@ function renderBarista() {
   let body = nav;
   if (activeTab === 'map') body += mapWorkspace('barista');
   else if (activeTab === 'archive') body += `<section class="card"><div class="card-head"><h2>Архив заявок</h2></div>${archive.length ? archive.map(x=>containerItem(x,'barista')).join('') : empty('Архив пока пуст','Завершённые и отменённые заявки переходят сюда через 24 часа.')}</section>`;
-  else body += `<section class="stats compact-stats">${stat('Готовы к вывозу',ready.length,`${number(ready.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`)}${stat('У логиста',own.filter(x=>['assigned','picked_up'].includes(x.status)).length)}${stat('Заявки сегодня',current.length)}</section><section class="card"><div class="card-head"><h2>Заявки точки</h2></div>${current.length ? current.map(x=>containerItem(x,'barista')).join('') : empty('Сегодня заявок нет','Новая заявка появится здесь после взвешивания.')}</section>`;
+  else body += `<section class="stats compact-stats">${stat('Готовы к вывозу',ready.length,`${number(ready.reduce((s,x)=>s+Number(x.wet_kg),0))} кг`)}${stat('У логиста',own.filter(x=>['assigned','picked_up'].includes(x.status)).length)}${stat('Заявки в работе',current.length)}</section><section class="card"><div class="card-head"><h2>Заявки точки</h2></div>${current.length ? current.map(x=>containerItem(x,'barista')).join('') : empty('Заявок нет','Новая заявка появится здесь после взвешивания.')}</section>`;
   shell('Сбор на точке', activeTab === 'map' ? 'Рейсы, которые забирают заявки вашей точки.' : '', activeTab === 'requests' ? button('Новая заявка','new-container','','btn-primary') : '', body);
 }
 
