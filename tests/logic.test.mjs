@@ -9,6 +9,8 @@ import {
   normalizeImportedRows,
   parseCsv,
   mergeWorkspaceState,
+  batchStock,
+  validateSaleDraft,
 } from "../dist/logic.js";
 
 test("estimates wet grounds from drink count", () => {
@@ -141,4 +143,20 @@ test("concurrent additions and independent economics changes are preserved", () 
   const local = { collections: [{ id: "A" }], economicsParams: { pricePerPack: 1200, dryYieldPct: 50 } };
   const remote = { collections: [{ id: "B" }], economicsParams: { pricePerPack: 1000, dryYieldPct: 55 } };
   assert.deepEqual(mergeWorkspaceState(base, local, remote), { collections: [{ id: "B" }, { id: "A" }], economicsParams: { pricePerPack: 1200, dryYieldPct: 55 } });
+});
+
+test("sales cannot exceed the produced stock", () => {
+  const batch = { id: "B", producedPacks: 78 };
+  const sales = [{ id: "S1", batchId: "B", packs: 24, unitPrice: 1800 }];
+  assert.deepEqual(batchStock(batch, sales), { produced: 78, sold: 24, available: 54 });
+  assert.doesNotThrow(() => validateSaleDraft(batch, sales, 54, 1800));
+  assert.throws(() => validateSaleDraft(batch, sales, 55, 1800), /осталось 54/);
+  assert.throws(() => validateSaleDraft(batch, sales, 1.5, 1800), /целое число/);
+});
+
+test("concurrent sales in separate tabs remain distinct", () => {
+  const base = { sales: [], batches: [{ id: "B", producedPacks: 78 }] };
+  const local = { ...base, sales: [{ id: "S1", batchId: "B", packs: 10 }] };
+  const remote = { ...base, sales: [{ id: "S2", batchId: "B", packs: 20 }] };
+  assert.deepEqual(mergeWorkspaceState(base, local, remote).sales.map((sale) => sale.id), ["S2", "S1"]);
 });

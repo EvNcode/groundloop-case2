@@ -2,7 +2,7 @@ import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from "./supabase-config.js";
 
 export const cloudEnabled = Boolean(SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY);
 const base = SUPABASE_URL.replace(/\/$/, "");
-const sessionKey = "groundloop_supabase_session";
+const sessionKey = "groundloop_demo_session";
 let session = null;
 
 function remember(value) {
@@ -11,12 +11,12 @@ function remember(value) {
   else localStorage.removeItem(sessionKey);
 }
 
-async function request(path, options = {}, token = null) {
+async function request(path, options = {}, accessToken = null) {
   const response = await fetch(`${base}${path}`, {
     ...options,
     headers: {
       apikey: SUPABASE_PUBLISHABLE_KEY,
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       "Content-Type": "application/json",
       ...options.headers,
     },
@@ -31,162 +31,68 @@ async function request(path, options = {}, token = null) {
   return response.json();
 }
 
-export async function restoreSession() {
+function setSession(value) {
+  const next = { ...value, expires_at: Number(value.expires_at) || Math.floor(Date.now() / 1000) + Number(value.expires_in || 3600) };
+  remember(next);
+  return next.user;
+}
+
+export async function openDemoSession() {
   if (!cloudEnabled) return null;
   try {
     const stored = JSON.parse(localStorage.getItem(sessionKey) || "null");
-    if (!stored?.refresh_token) return null;
-    if (stored.access_token && stored.user && Date.now() < (Number(stored.expires_at || 0) - 60) * 1000) {
-      remember(stored);
-      return stored.user;
+    if (stored?.user?.is_anonymous && stored.refresh_token) {
+      if (stored.access_token && Date.now() < (Number(stored.expires_at) - 60) * 1000) {
+        remember(stored);
+        return stored.user;
+      }
+      const refreshed = await request("/auth/v1/token?grant_type=refresh_token", {
+        method: "POST", body: JSON.stringify({ refresh_token: stored.refresh_token }),
+      });
+      if (refreshed.user?.is_anonymous) return setSession(refreshed);
     }
-    const refreshed = await request("/auth/v1/token?grant_type=refresh_token", {
-      method: "POST", body: JSON.stringify({ refresh_token: stored.refresh_token }),
-    });
-    remember(refreshed);
-    return refreshed.user;
-  } catch {
-    remember(null);
-    return null;
-  }
-}
-
-export async function signIn(email, password) {
-  const result = await request("/auth/v1/token?grant_type=password", {
-    method: "POST", body: JSON.stringify({ email, password }),
-  });
-  remember(result);
-  return result.user;
-}
-
-export async function signUp(email, password) {
-  return request("/auth/v1/signup", { method: "POST", body: JSON.stringify({ email, password }) });
-}
-
-export async function requestPasswordRecovery(email) {
-  return request("/auth/v1/recover", {
-    method: "POST", body: JSON.stringify({ email }),
-  });
-}
-
-export async function signOut() {
-  if (session?.access_token) {
-    await request("/auth/v1/logout", { method: "POST" }, session.access_token).catch(() => {});
-  }
-  remember(null);
-}
-
-export async function acceptInviteSession() {
-  if (!cloudEnabled) return false;
-  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-  const accessToken = params.get("access_token");
-  const refreshToken = params.get("refresh_token");
-  if (!accessToken || !refreshToken || !["invite", "recovery"].includes(params.get("type"))) return false;
-  const user = await request("/auth/v1/user", {}, accessToken);
-  remember({
-    access_token: accessToken,
-    refresh_token: refreshToken,
-    expires_at: Number(params.get("expires_at")) || Math.floor(Date.now() / 1000) + Number(params.get("expires_in") || 3600),
-    user,
-  });
-  history.replaceState(null, "", location.pathname + location.search);
-  return true;
-}
-
-export async function updatePassword(password) {
-  const user = await request("/auth/v1/user", {
-    method: "PUT", body: JSON.stringify({ password }),
-  }, await token());
-  session.user = user;
-  remember(session);
-  return user;
+  } catch { remember(null); }
+  const created = await request("/auth/v1/signup", { method: "POST", body: "{}" });
+  if (!created.user?.is_anonymous || !created.access_token) throw new Error("Не удалось открыть демо-сессию");
+  return setSession(created);
 }
 
 async function token() {
-  if (!session) throw new Error("Войдите в систему");
-  if (Date.now() >= (session.expires_at - 60) * 1000) {
+  if (!session?.user?.is_anonymous) throw new Error("Демо-сессия не открыта");
+  if (Date.now() >= (Number(session.expires_at) - 60) * 1000) {
     const refreshed = await request("/auth/v1/token?grant_type=refresh_token", {
       method: "POST", body: JSON.stringify({ refresh_token: session.refresh_token }),
     });
-    remember(refreshed);
+    setSession(refreshed);
   }
   return session.access_token;
 }
 
-export async function getMembership(userId) {
-  const rows = await request(`/rest/v1/groundloop_members?user_id=eq.${encodeURIComponent(userId)}&select=role&limit=1`, {}, await token());
-  return rows[0]?.role || null;
-}
-
-export async function requestTeamAccess(user) {
-  return request("/rest/v1/groundloop_access_requests", {
-    method: "POST",
-    headers: { Prefer: "resolution=ignore-duplicates,return=representation" },
-    body: JSON.stringify({ user_id: user.id, email: user.email }),
-  }, await token());
-}
-
-export async function listTeam() {
-  const accessToken = await token();
-  const [members, requests] = await Promise.all([
-    request("/rest/v1/groundloop_members?select=user_id,email,role,created_at&order=created_at.asc", {}, accessToken),
-    request("/rest/v1/groundloop_access_requests?select=user_id,email,created_at&order=created_at.asc", {}, accessToken),
-  ]);
-  return { members, requests };
-}
-
-export async function approveTeamAccess(accessRequest, role) {
-  if (!["operator", "viewer"].includes(role)) throw new Error("Выберите роль сотрудника");
-  const accessToken = await token();
-  await request("/rest/v1/groundloop_members", {
-    method: "POST", headers: { Prefer: "resolution=ignore-duplicates,return=representation" },
-    body: JSON.stringify({ user_id: accessRequest.user_id, email: accessRequest.email, role }),
-  }, accessToken);
-  await request(`/rest/v1/groundloop_access_requests?user_id=eq.${encodeURIComponent(accessRequest.user_id)}`, {
-    method: "DELETE", headers: { Prefer: "return=minimal" },
-  }, accessToken);
-}
-
-export async function updateTeamRole(userId, role) {
-  if (!["admin", "operator", "viewer"].includes(role)) throw new Error("Неизвестная роль");
-  const rows = await request(`/rest/v1/groundloop_members?user_id=eq.${encodeURIComponent(userId)}&select=user_id`, {
-    method: "PATCH", headers: { Prefer: "return=representation" },
-    body: JSON.stringify({ role }),
-  }, await token());
-  if (!rows.length) throw new Error("Не удалось обновить роль");
-}
-
-export async function readWorkspace() {
-  const rows = await request("/rest/v1/groundloop_workspace?id=eq.pilot&select=state,revision", {}, await token());
+export async function readWorkspace(userId) {
+  const rows = await request(`/rest/v1/groundloop_demo_workspace?owner_id=eq.${encodeURIComponent(userId)}&select=state,revision&limit=1`, {}, await token());
   return rows[0] || null;
 }
 
-export async function readWorkspaceHistory() {
-  return request("/rest/v1/groundloop_workspace_history?workspace_id=eq.pilot&select=revision,changed_at,actor_email,changed_sections&order=revision.desc&limit=20", {}, await token());
-}
-
-export async function readWorkspaceSnapshot(revision) {
-  if (!Number.isSafeInteger(Number(revision)) || Number(revision) < 1) throw new Error("Неверная версия");
-  const rows = await request(`/rest/v1/groundloop_workspace_history?workspace_id=eq.pilot&revision=eq.${Number(revision)}&select=state&limit=1`, {}, await token());
-  if (!rows.length) throw new Error("Версия не найдена");
-  return rows[0].state;
-}
-
 export async function createWorkspace(state, userId) {
-  const rows = await request("/rest/v1/groundloop_workspace", {
-    method: "POST", headers: { Prefer: "return=representation" },
-    body: JSON.stringify({ id: "pilot", state, updated_by: userId }),
-  }, await token());
-  return rows[0];
+  try {
+    const rows = await request("/rest/v1/groundloop_demo_workspace?select=state,revision", {
+      method: "POST", headers: { Prefer: "return=representation" },
+      body: JSON.stringify({ owner_id: userId, state }),
+    }, await token());
+    return rows[0];
+  } catch (error) {
+    if (error.status === 409) return readWorkspace(userId);
+    throw error;
+  }
 }
 
 export async function updateWorkspace(state, revision, userId) {
-  const rows = await request(`/rest/v1/groundloop_workspace?id=eq.pilot&revision=eq.${revision}&select=revision`, {
+  const rows = await request(`/rest/v1/groundloop_demo_workspace?owner_id=eq.${encodeURIComponent(userId)}&revision=eq.${revision}&select=revision`, {
     method: "PATCH", headers: { Prefer: "return=representation" },
-    body: JSON.stringify({ state, revision: revision + 1, updated_by: userId, updated_at: new Date().toISOString() }),
+    body: JSON.stringify({ state, revision: revision + 1 }),
   }, await token());
   if (!rows.length) {
-    const error = new Error("Данные изменились у другого сотрудника");
+    const error = new Error("Демо изменилось в другой вкладке");
     error.code = "conflict";
     throw error;
   }

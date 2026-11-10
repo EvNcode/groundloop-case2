@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f3f6f4" />
-    <meta name="description" content="GroundLoop — внутренняя операционная консоль для учёта, сбора и переработки кофейного жмыха Global Coffee × Coyote." />
-    <title>GroundLoop — операционный учёт жмыха</title>
+    <meta name="description" content="GroundLoop — демо полного пути кофейного жмыха: сбор, хранение, вывоз, производство и продажа." />
+    <title>GroundLoop — от жмыха к продукту</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet" />
@@ -19,26 +19,7 @@
     <script type="module" src="./app.js"></script>
   </head>
   <body>
-    <section class="auth-screen" id="authScreen" hidden>
-      <div class="auth-card">
-        <div class="brand-block"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><p class="brand-name">GroundLoop</p><p class="brand-subtitle">Global Coffee × Coyote</p></div></div>
-        <h1>Вход для сотрудников</h1>
-        <form id="authForm">
-          <label class="field">Почта<input name="email" type="email" autocomplete="username" required /></label>
-          <label class="field">Пароль<input name="password" type="password" autocomplete="current-password" required minlength="6" /></label>
-          <button class="button button-primary" type="submit">Войти</button>
-        </form>
-        <form id="inviteForm" hidden>
-          <label class="field">Новый пароль<input name="password" type="password" autocomplete="new-password" required minlength="8" /></label>
-          <button class="button button-primary" type="submit">Установить пароль</button>
-        </form>
-        <button class="text-button" id="signUp" type="button">Создать аккаунт</button>
-        <button class="text-button" id="recoverPassword" type="button">Забыли пароль?</button>
-        <button class="text-button" id="authSignOut" type="button" hidden>Сменить аккаунт</button>
-        <p id="authMessage" role="status"></p>
-      </div>
-    </section>
-    <div class="app-shell">
+    <div class="app-shell" hidden>
       <aside class="sidebar" id="sidebar">
         <div class="brand-block">
           <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
@@ -48,7 +29,7 @@
           </div>
         </div>
 
-        <div class="mode-line"><span></span><div><strong>Демо-режим</strong><small>Синтетические данные</small></div></div>
+        <div class="mode-line"><span></span><div><strong>Личное демо</strong><small>Синтетические данные</small></div></div>
 
         <nav class="main-nav" aria-label="Основная навигация">
           <button class="nav-item active" data-view="overview"><b>01</b><span>Обзор</span></button>
@@ -56,9 +37,8 @@
           <button class="nav-item" data-view="logistics"><b>03</b><span>Логистика</span></button>
           <button class="nav-item" data-view="production"><b>04</b><span>Производство</span></button>
           <button class="nav-item" data-view="economics"><b>05</b><span>Экономика</span></button>
-          <button class="nav-item" data-view="traceability"><b>06</b><span>Паспорт партии</span></button>
+          <button class="nav-item" data-view="traceability"><b>06</b><span>Продукт и партия</span></button>
           <button class="nav-item" data-view="data"><b>07</b><span>Данные</span></button>
-          <button class="nav-item" data-view="team" hidden><b>08</b><span>Команда</span></button>
         </nav>
 
         <div class="sidebar-footer">
@@ -73,16 +53,8 @@
             <h1 id="viewTitle">Обзор пилота</h1>
           </div>
           <div class="topbar-actions">
-            <span class="sync-status" id="syncStatus">Локальное демо</span>
-            <button class="text-button" id="reloadWorkspace" type="button" hidden>Обновить данные</button>
-            <button class="text-button" id="signOut" type="button" hidden>Выйти</button>
-            <label class="scenario-select">
-              <select id="globalScenario" aria-label="Сценарий расчёта">
-                <option value="conservative">Осторожный</option>
-                <option value="base" selected>Базовый</option>
-                <option value="optimistic">Оптимистичный</option>
-              </select>
-            </label>
+            <span class="sync-status" id="syncStatus">Подключение…</span>
+            <button class="text-button" id="reloadWorkspace" type="button" hidden>Повторить</button>
             <button class="button button-primary" data-action="open-collection">Зафиксировать сбор</button>
           </div>
         </header>
@@ -129,6 +101,20 @@
           <button class="button button-ghost" value="cancel">Отмена</button>
           <button class="button button-primary" value="default" type="submit">Сохранить сбор</button>
         </div>
+      </form>
+    </dialog>
+
+    <dialog id="saleDialog" class="dialog">
+      <form method="dialog" id="saleForm">
+        <div class="dialog-header"><div><p class="eyebrow">Новая продажа</p><h2>Выдача готового продукта</h2></div><button class="icon-button" value="cancel" aria-label="Закрыть">×</button></div>
+        <div class="form-grid">
+          <label class="field field-wide">Партия<select name="batchId" id="saleBatch" required></select></label>
+          <label class="field">Упаковок<input name="packs" type="number" min="1" step="1" required /></label>
+          <label class="field">Цена за упаковку, ₸<input name="unitPrice" type="number" min="0" step="1" required /></label>
+          <label class="field field-wide">Канал<select name="channel"><option>Пилот в кофейне</option><option>Партнёрская точка</option><option>Тестовый заказ</option></select></label>
+        </div>
+        <div class="dialog-note">Запись уменьшит остаток партии. В демо продажи остаются синтетическими.</div>
+        <div class="dialog-actions"><button class="button button-ghost" value="cancel">Отмена</button><button class="button button-primary" type="submit">Зафиксировать продажу</button></div>
       </form>
     </dialog>
 

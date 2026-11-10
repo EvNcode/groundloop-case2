@@ -2,6 +2,7 @@ import {
   STORAGE_KEY,
   SCENARIOS,
   buildPickupRoute,
+  batchStock,
   calculateDryOutput,
   calculateEconomics,
   calculatePackOutput,
@@ -13,19 +14,20 @@ import {
   sameValue,
   parseCsv,
   round,
+  validateSaleDraft,
 } from "./logic.js";
-import { cloudEnabled, restoreSession, signIn, signUp, requestPasswordRecovery, signOut, acceptInviteSession, updatePassword, getMembership, requestTeamAccess, listTeam, approveTeamAccess, updateTeamRole, readWorkspace, readWorkspaceHistory, readWorkspaceSnapshot, createWorkspace, updateWorkspace } from "./cloud.js";
+import { cloudEnabled, openDemoSession, readWorkspace, createWorkspace, updateWorkspace } from "./cloud.js";
 
 const TODAY = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Qyzylorda", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+const dayAgo = (days) => new Date(Date.parse(`${TODAY}T12:00:00Z`) - days * 86400000).toISOString().slice(0, 10);
 const viewMeta = {
   overview: "Смена и задачи",
   collections: "Сбор на точках",
   logistics: "Логистика",
   production: "Производство",
   economics: "Экономика",
-  traceability: "Паспорт партии",
+  traceability: "Продукт и партия",
   data: "Данные",
-  team: "Команда",
 };
 
 function seedState() {
@@ -51,18 +53,20 @@ function seedState() {
   ].map(([id, name, district, avgCups, active]) => ({ id, name, district, avgCups, active }));
 
   const records = [
-    ["COL-101", "GC-01", "2026-11-06", 238, 7.7, "ready", "good", "measured"],
-    ["COL-102", "GC-02", "2026-11-06", 211, 6.8, "ready", "good", "measured"],
-    ["COL-103", "GC-03", "2026-11-06", 326, 10.4, "ready", "pending", "estimated"],
-    ["COL-104", "GC-04", "2026-11-05", 279, 8.9, "scheduled", "good", "measured"],
-    ["COL-105", "GC-05", "2026-11-05", 187, 6.0, "collected", "good", "estimated"],
-    ["COL-106", "GC-06", "2026-11-05", 301, 9.6, "collected", "good", "measured"],
-    ["COL-107", "GC-01", "2026-11-04", 247, 7.9, "collected", "good", "measured"],
-    ["COL-108", "GC-03", "2026-11-04", 319, 10.2, "collected", "good", "estimated"],
-    ["COL-109", "GC-04", "2026-11-04", 291, 9.3, "collected", "good", "measured"],
-    ["COL-110", "GC-02", "2026-11-03", 205, 6.6, "rejected", "rejected", "measured"],
+    ["COL-101", "GC-01", TODAY, 238, 7.7, "ready", "good", "measured"],
+    ["COL-102", "GC-02", TODAY, 211, 6.8, "ready", "good", "measured"],
+    ["COL-103", "GC-03", TODAY, 326, 10.4, "review", "pending", "estimated"],
+    ["COL-104", "GC-04", dayAgo(1), 279, 8.9, "scheduled", "good", "measured"],
+    ["COL-105", "GC-05", dayAgo(1), 187, 6.0, "collected", "good", "estimated"],
+    ["COL-106", "GC-06", dayAgo(1), 301, 9.6, "collected", "good", "measured"],
+    ["COL-107", "GC-01", dayAgo(2), 247, 7.9, "collected", "good", "measured"],
+    ["COL-108", "GC-03", dayAgo(2), 319, 10.2, "collected", "good", "estimated"],
+    ["COL-109", "GC-04", dayAgo(2), 291, 9.3, "collected", "good", "measured"],
+    ["COL-110", "GC-02", dayAgo(3), 205, 6.6, "rejected", "rejected", "measured"],
   ].map(([id, storeId, date, cups, wetKg, status, quality, weightSource]) => ({
     id, storeId, date, cups, wetKg, status, quality, weightSource, source: "synthetic", note: "",
+    containerCode: `${storeId}-${date.replaceAll("-", "")}`,
+    storedAt: `${date}T09:00:00+05:00`,
   }));
 
   return {
@@ -75,7 +79,7 @@ function seedState() {
     routes: [
       {
         id: "RT-2026-1105",
-        date: "2026-11-05",
+        date: dayAgo(1),
         status: "completed",
         collectionIds: ["COL-105", "COL-106", "COL-107", "COL-108", "COL-109"],
         distanceKm: 18.4,
@@ -85,7 +89,7 @@ function seedState() {
     batches: [
       {
         id: "GL-261104-A",
-        createdAt: "2026-11-04",
+        createdAt: dayAgo(2),
         collectionIds: ["COL-107", "COL-108", "COL-109"],
         sourceStores: ["GC-01", "GC-03", "GC-04"],
         wetKg: 27.4,
@@ -96,11 +100,11 @@ function seedState() {
         status: "complete",
         groundsPerPackG: 160,
         producedPacks: 78,
-        recipe: "R-01 / кофейный жмых + бумажное волокно + связующее",
+        recipe: "R-01 / жмых + бумажное волокно + связующее",
       },
       {
         id: "GL-261105-B",
-        createdAt: "2026-11-05",
+        createdAt: dayAgo(1),
         collectionIds: ["COL-105", "COL-106"],
         sourceStores: ["GC-05", "GC-06"],
         wetKg: 15.6,
@@ -115,7 +119,10 @@ function seedState() {
       },
     ],
     productionRuns: [
-      { id: "PR-001", batchId: "GL-261104-A", date: "2026-11-05", producedPacks: 78, status: "complete" },
+      { id: "PR-001", batchId: "GL-261104-A", date: dayAgo(1), producedPacks: 78, status: "complete" },
+    ],
+    sales: [
+      { id: "SL-001", batchId: "GL-261104-A", date: TODAY, packs: 24, unitPrice: 1800, channel: "Пилот в кофейне", source: "synthetic" },
     ],
     selectedBatchId: "GL-261104-A",
     economicsParams: {
@@ -143,7 +150,7 @@ function loadState() {
 function hydrateState(raw) {
   const baseline = seedState();
   const next = { ...baseline, ...raw, economicsParams: { ...baseline.economicsParams, ...(raw?.economicsParams || {}) } };
-  for (const key of ["stores", "collections", "routes", "batches", "productionRuns"]) {
+  for (const key of ["stores", "collections", "routes", "batches", "productionRuns", "sales"]) {
     if (!Array.isArray(next[key])) next[key] = baseline[key];
   }
   if (!SCENARIOS[next.scenario]) next.scenario = "base";
@@ -154,22 +161,21 @@ function hydrateState(raw) {
 let state = loadState();
 let toastTimer;
 let cloudUser = null;
-let cloudRole = null;
 let cloudRevision = 0;
 let saveQueue = Promise.resolve();
 let cloudSaveBlocked = false;
 let cloudBaseState = null;
 let lastQueuedState = null;
-let teamData = { members: [], requests: [] };
-let historyRows = [];
 
 const contentArea = document.querySelector("#contentArea");
 const viewTitle = document.querySelector("#viewTitle");
-const globalScenario = document.querySelector("#globalScenario");
 const collectionDialog = document.querySelector("#collectionDialog");
 const collectionForm = document.querySelector("#collectionForm");
 const collectionStore = document.querySelector("#collectionStore");
 const collectionDate = document.querySelector("#collectionDate");
+const saleDialog = document.querySelector("#saleDialog");
+const saleForm = document.querySelector("#saleForm");
+const saleBatch = document.querySelector("#saleBatch");
 const toast = document.querySelector("#toast");
 
 function saveState() {
@@ -177,7 +183,7 @@ function saveState() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     return;
   }
-  if (!cloudUser || cloudRole === "viewer" || cloudSaveBlocked) return;
+  if (!cloudUser || cloudSaveBlocked) return;
   const snapshot = structuredClone(state);
   snapshot.currentView = "overview";
   snapshot.selectedBatchId = cloudBaseState?.selectedBatchId || snapshot.selectedBatchId;
@@ -206,11 +212,10 @@ function saveState() {
           }
         }
         document.querySelector("#syncStatus").textContent = merged ? "Объединено и сохранено" : "Сохранено";
-        if (state.currentView === "data") void refreshHistory().catch((error) => showToast(error.message));
         return;
       } catch (error) {
         if (error.code !== "conflict" || attempt === 2) throw error;
-        const remote = await readWorkspace();
+        const remote = await readWorkspace(cloudUser.id);
         if (!remote) throw new Error("Рабочее пространство недоступно");
         cloudRevision = remote.revision;
         cloudBaseState = structuredClone(remote.state);
@@ -271,6 +276,12 @@ function formatDate(value) {
   if (!value) return "—";
   const date = new Date(`${value}T12:00:00`);
   return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short" }).format(date);
+}
+
+function storageLabel(item) {
+  if (!item.storedAt || ["collected", "rejected"].includes(item.status)) return "";
+  const hours = Math.max(0, Math.floor((Date.now() - Date.parse(item.storedAt)) / 3600000));
+  return `${h(item.containerCode || "контейнер без кода")} · ${hours} ч на точке${hours >= 24 ? " · нужен вывоз" : ""}`;
 }
 
 function syntheticNotice() {
@@ -378,10 +389,11 @@ function renderCollections() {
         <article class="kpi-card"><div class="kpi-label">Оценено</div><div class="kpi-value">${state.collections.filter((x) => x.weightSource === "estimated").length}</div><div class="kpi-footer"><span>расчёт по числу напитков</span></div></article>
         <article class="kpi-card"><div class="kpi-label">Отклонено</div><div class="kpi-value">${state.collections.filter((x) => x.status === "rejected").length}</div><div class="kpi-footer"><span>не попадёт в партию</span></div></article>
       </section>
+      <section class="panel panel-pad storage-note"><div><p class="eyebrow">Хранение на точке</p><h2>Код, время, качество</h2><p>После взвешивания жмых помещают в закрытый подписанный контейнер. Журнал показывает время хранения; 24 часа до вывоза — целевой срок пилота, который нужно проверить на практике.</p></div><strong>${state.collections.filter((item) => item.storedAt && !["collected", "rejected"].includes(item.status) && Date.now() - Date.parse(item.storedAt) >= 86400000).length} требуют внимания</strong></section>
       <section class="panel">
         <div class="panel-header"><div><h2>Журнал сбора</h2></div><button class="button button-primary" data-action="open-collection">Добавить</button></div>
         <div class="table-wrap"><table><thead><tr><th>ID</th><th>Точка</th><th>Дата</th><th>Продажи</th><th>Жмых</th><th>Качество</th><th>Статус / действие</th></tr></thead><tbody>
-          ${[...state.collections].sort((a,b) => b.date.localeCompare(a.date)).map((item) => `<tr><td>${h(item.id)}</td><td><span class="table-title">${h(storeFor(item.storeId)?.name || item.storeName)}</span><span class="table-sub">${h(storeFor(item.storeId)?.district || "Импорт")}</span></td><td>${formatDate(item.date)}</td><td>${formatNumber(item.cups)} напитков</td><td><strong>${formatNumber(item.wetKg,1)} кг</strong><span class="table-sub">${sourceLabel(item.weightSource)}</span></td><td><span class="badge badge-${h(item.quality)}">${qualityLabel(item.quality)}</span></td><td>${item.quality === "pending" ? `<div class="review-actions"><button class="button button-dark button-small" data-action="approve-collection" data-id="${h(item.id)}">Принять</button><button class="button button-ghost button-small" data-action="reject-collection" data-id="${h(item.id)}">Отклонить</button></div>` : `<span class="badge badge-${h(item.status)}">${statusLabel(item.status)}</span>`}</td></tr>`).join("")}
+          ${[...state.collections].sort((a,b) => b.date.localeCompare(a.date)).map((item) => `<tr><td>${h(item.id)}</td><td><span class="table-title">${h(storeFor(item.storeId)?.name || item.storeName)}</span><span class="table-sub">${h(storeFor(item.storeId)?.district || "Импорт")}</span></td><td>${formatDate(item.date)}<span class="table-sub">${storageLabel(item)}</span></td><td>${formatNumber(item.cups)} напитков</td><td><strong>${formatNumber(item.wetKg,1)} кг</strong><span class="table-sub">${sourceLabel(item.weightSource)}</span></td><td><span class="badge badge-${h(item.quality)}">${qualityLabel(item.quality)}</span></td><td>${item.quality === "pending" ? `<div class="review-actions"><button class="button button-dark button-small" data-action="approve-collection" data-id="${h(item.id)}">Принять</button><button class="button button-ghost button-small" data-action="reject-collection" data-id="${h(item.id)}">Отклонить</button></div>` : `<span class="badge badge-${h(item.status)}">${statusLabel(item.status)}</span>`}</td></tr>`).join("")}
         </tbody></table></div>
       </section>
       <section class="panel">
@@ -411,14 +423,14 @@ function renderLogistics() {
           <div style="margin-top:20px"><button class="button button-primary" data-action="create-route" ${!routePreview.stops.length ? "disabled" : ""}>Создать маршрут</button></div>
         </article>
         <article class="panel panel-pad">
-          <p class="eyebrow">Логика MVP</p><h2 style="margin:8px 0 14px">Как система решает, когда ехать</h2>
+          <p class="eyebrow">Перед вывозом</p><h2 style="margin:8px 0 14px">Проверьте контейнеры</h2>
           <div class="assumption-list">
-            <div class="assumption"><i></i><span>Контейнер отмечен готовым</span><strong>обязательно</strong></div>
-            <div class="assumption"><i></i><span>Точки группируются по району</span><strong>автоматически</strong></div>
-            <div class="assumption"><i></i><span>Масса партии</span><strong>из журнала</strong></div>
-            <div class="assumption"><i></i><span>Оптимизация дорог</span><strong>демо-эвристика</strong></div>
+            <div class="assumption"><i></i><span>Код и время хранения</span><strong>в журнале</strong></div>
+            <div class="assumption"><i></i><span>Качество сырья</span><strong>проверено</strong></div>
+            <div class="assumption"><i></i><span>Вес к вывозу</span><strong>${formatNumber(routePreview.totalKg, 1)} кг</strong></div>
+            <div class="assumption"><i></i><span>Остановки</span><strong>${routePreview.stops.length}</strong></div>
           </div>
-          <p style="color:var(--muted);font-size:11px;line-height:1.6;margin-bottom:0">В продакшене эвристику можно заменить картографическим API, не меняя процесс для бариста.</p>
+          <p style="color:var(--muted);font-size:11px;line-height:1.6;margin-bottom:0">Порядок остановок и время в пути — модельная оценка без дорожного API.</p>
         </article>
       </section>
       <section class="panel">
@@ -443,7 +455,7 @@ function renderProduction() {
         <article class="kpi-card"><div class="kpi-label">Собрано без партии</div><div class="kpi-value">${round(unbatched.reduce((s,x)=>s+x.wetKg,0),1)} кг</div><div class="kpi-footer"><span>${unbatched.length} записей</span></div></article>
         <article class="kpi-card"><div class="kpi-label">Партий</div><div class="kpi-value">${state.batches.length}</div><div class="kpi-footer"><span>полная прослеживаемость</span></div></article>
         <article class="kpi-card"><div class="kpi-label">Готовой продукции</div><div class="kpi-value">${formatNumber(state.productionRuns.reduce((s,x)=>s+Number(x.producedPacks || 0),0))}</div><div class="kpi-footer"><span>упаковок в демо</span></div></article>
-        <article class="kpi-card"><div class="kpi-label">Сухой выход модели</div><div class="kpi-value">${formatNumber(state.economicsParams.dryYieldPct)}%</div><div class="kpi-footer"><span>редактируется в экономике</span></div></article>
+        <article class="kpi-card"><div class="kpi-label">Продано / остаток</div><div class="kpi-value">${formatNumber(state.sales.reduce((sum, sale) => sum + sale.packs, 0))} / ${formatNumber(state.batches.reduce((sum, batch) => sum + batchStock(batch, state.sales).available, 0))}</div><div class="kpi-footer"><span>упаковок в демо</span></div></article>
       </section>
       <section class="panel">
         <div class="panel-header"><div><h2>Партии</h2></div><button class="button button-primary" data-action="create-batch" ${!unbatched.length ? "disabled" : ""}>Новая партия</button></div>
@@ -456,6 +468,9 @@ function renderProduction() {
         </div>
       </section>
       ${renderSelectedBatch()}
+      <section class="panel"><div class="panel-header"><div><h2>Продажи</h2><p class="table-sub">Синтетические записи для проверки пути от партии до выручки</p></div><button class="button button-primary" data-action="open-sale" ${state.batches.every((batch) => batchStock(batch, state.sales).available === 0) ? "disabled" : ""}>Зафиксировать продажу</button></div>
+        <div class="table-wrap"><table><thead><tr><th>Дата</th><th>Партия</th><th>Канал</th><th>Продано</th><th>Цена</th><th>Выручка</th></tr></thead><tbody>${[...state.sales].reverse().map((sale) => `<tr><td>${formatDate(sale.date)}</td><td>${h(sale.batchId)}</td><td>${h(sale.channel)}</td><td>${formatNumber(sale.packs)} уп.</td><td>${formatMoney(sale.unitPrice)}</td><td>${formatMoney(sale.packs * sale.unitPrice)}</td></tr>`).join("") || `<tr><td colspan="6"><div class="empty-state"><strong>Продаж пока нет</strong>Зафиксируйте выпуск и первую продажу.</div></td></tr>`}</tbody></table></div>
+      </section>
     </div>`;
 }
 
@@ -463,6 +478,7 @@ function renderSelectedBatch() {
   const batch = state.batches.find((b) => b.id === state.selectedBatchId) || state.batches[0];
   if (!batch) return "";
   const potential = calculatePackOutput(batch.acceptedKg, batch.groundsPerPackG || 160, 100);
+  const stock = batchStock(batch, state.sales);
   const sources = batch.sourceStores.map((id) => storeFor(id)?.name.replace("Global Coffee — ","") || id).join(", ");
   return `<section class="split-grid">
     <article class="panel panel-pad">
@@ -472,9 +488,11 @@ function renderSelectedBatch() {
         <label class="field">Брак, %<input type="number" value="${h(batch.rejectPct)}" disabled /></label>
         <label class="field">Жмых на упаковку, г<input type="number" value="${h(batch.groundsPerPackG || 160)}" disabled /></label>
         <label class="field">Потенциальный выпуск<input type="text" value="${potential.producedPacks} упаковок" disabled /></label>
+        <label class="field">Продано<input type="text" value="${stock.sold} упаковок" disabled /></label>
+        <label class="field">Остаток<input type="text" value="${stock.available} упаковок" disabled /></label>
         <label class="field field-wide">Источники<input type="text" value="${h(sources)}" disabled /></label>
       </div>
-      <div style="margin-top:16px;display:flex;gap:9px"><button class="button button-primary" data-action="create-run" data-id="${h(batch.id)}" ${batch.status !== "complete" || batch.producedPacks ? "disabled" : ""}>Зафиксировать выпуск</button><button class="button button-ghost" data-view-link="traceability">Паспорт партии</button></div>
+      <div style="margin-top:16px;display:flex;gap:9px"><button class="button button-primary" data-action="create-run" data-id="${h(batch.id)}" ${batch.status !== "complete" || batch.producedPacks ? "disabled" : ""}>Зафиксировать выпуск</button><button class="button button-ghost" data-view-link="traceability">Продукт и паспорт</button></div>
     </article>
     <article class="panel">
       <div class="panel-header"><div><h2>Этапы</h2></div></div>
@@ -532,6 +550,11 @@ function renderTraceability() {
   if (!batch) return `<div class="empty-state"><strong>Нет партий</strong>Сначала создайте партию в разделе «Производство».</div>`;
   const stores = batch.sourceStores.map((id) => storeFor(id)).filter(Boolean);
   return `<div class="view-stack">
+    ${syntheticNotice()}
+    <section class="panel panel-pad product-brief">
+      <div><p class="eyebrow">Продукт R-01 · гипотеза</p><h2>Набор подставок из кофейного композита</h2><p>Сухой кофейный жмых, бумажное волокно и связующее формуются в подставки для кофейни. Один набор использует ${formatNumber(batch.groundsPerPackG)} г сухого жмыха. Состав и прочность требуют испытаний на физическом образце.</p></div>
+      <div class="product-facts"><div><span>Сырьё</span><strong>жмых + волокно</strong></div><div><span>Процесс</span><strong>сушка → прессование</strong></div><div><span>Продажа</span><strong>набор в упаковке</strong></div></div>
+    </section>
     <div class="panel panel-pad" style="display:flex;align-items:end;justify-content:space-between;gap:15px;flex-wrap:wrap"><label class="field" style="min-width:280px">Выберите партию<select id="passportBatch">${state.batches.map((b)=>`<option value="${h(b.id)}" ${b.id===batch.id?"selected":""}>${h(b.id)} · ${statusLabel(b.status)}</option>`).join("")}</select></label><span class="badge badge-${h(batch.status)}">${statusLabel(batch.status)}</span></div>
     <section class="passport">
       <div class="passport-cover" data-batch="${h(batch.id)}"><p class="eyebrow">Паспорт партии</p><h2>${h(batch.id)}</h2></div>
@@ -539,30 +562,28 @@ function renderTraceability() {
         <div class="passport-section"><h3>Происхождение</h3>${stores.map((s)=>`<div class="passport-fact"><span>${h(s.name.replace("Global Coffee — ",""))}</span><strong>${h(s.district)}</strong></div>`).join("") || `<div class="passport-fact"><span>Источник</span><strong>не указан</strong></div>`}</div>
         <div class="passport-section"><h3>Материальный баланс</h3><div class="passport-fact"><span>Мокрый жмых</span><strong>${h(batch.wetKg)} кг</strong></div><div class="passport-fact"><span>После сушки</span><strong>${h(batch.driedKg)} кг</strong></div><div class="passport-fact"><span>Принято</span><strong>${h(batch.acceptedKg)} кг</strong></div><div class="passport-fact"><span>Выпуск</span><strong>${batch.producedPacks ? `${h(batch.producedPacks)} уп.` : "ожидается"}</strong></div></div>
         <div class="passport-section"><h3>Контроль партии</h3><div class="passport-fact"><span>Дата создания</span><strong>${formatDate(batch.createdAt)}</strong></div><div class="passport-fact"><span>Рецептура</span><strong>R-01</strong></div><div class="passport-fact"><span>Статус</span><strong>${statusLabel(batch.status)}</strong></div></div>
-        <div class="passport-section"><h3>Маркировка</h3><div style="display:flex;align-items:center;gap:18px"><div class="qr-placeholder" aria-hidden="true">${Array.from({length:25},()=>"<i></i>").join("")}</div><p style="color:var(--muted);font-size:10px;line-height:1.55">Макет этикетки. Публичная ссылка и настоящий QR-код пока не настроены.</p></div></div>
+        <div class="passport-section"><h3>Выпуск и продажа</h3><div class="passport-fact"><span>Произведено</span><strong>${formatNumber(batch.producedPacks || 0)} уп.</strong></div><div class="passport-fact"><span>Продано в демо</span><strong>${formatNumber(batchStock(batch, state.sales).sold)} уп.</strong></div><div class="passport-fact"><span>Остаток</span><strong>${formatNumber(batchStock(batch, state.sales).available)} уп.</strong></div></div>
       </div>
     </section>
   </div>`;
 }
 
 function renderData() {
-  const sectionLabels = { baseline: "Начальное состояние", created: "Создание", stores: "Точки", collections: "Сбор", routes: "Маршруты", batches: "Партии", productionRuns: "Выпуск", economicsParams: "Экономика", scenario: "Сценарий", dataMode: "Источник" };
-  const changedLabel = (row) => (row.changed_sections || []).map((section) => sectionLabels[section] || section).join(", ") || "Данные";
   return `<div class="view-stack">
     ${syntheticNotice()}
     <section class="split-grid">
       <article class="panel panel-pad">
-        <p class="eyebrow">Импорт Coyote</p><h2 style="margin:7px 0 16px">Загрузите CSV или Excel</h2>
+        <p class="eyebrow">Импорт отчёта</p><h2 style="margin:7px 0 16px">Загрузите CSV или Excel</h2>
         <div class="upload-zone" id="uploadZone"><div class="upload-icon">⇧</div><h3>Перетащите отчёт сюда</h3><p>Колонки: Точка, Дата, Напитки, Жмых кг. Вес можно не указывать — он будет рассчитан.</p><input type="file" id="fileInput" accept=".csv,.xlsx,.xls" hidden /><button class="button button-primary" data-action="choose-file">Выбрать файл</button></div>
         ${state.lastImport ? `<div class="notice" style="margin-top:15px"><span class="notice-dot"></span><div><strong>Последний импорт: ${h(state.lastImport.fileName)}</strong>${formatNumber(state.lastImport.rows)} строк · ${h(state.lastImport.at)}</div></div>` : ""}
       </article>
       <article class="panel panel-pad">
         <p class="eyebrow">Управление данными</p><h2 style="margin:7px 0 16px">Переносимые данные</h2>
-        <div class="data-actions"><button class="button button-dark" data-action="download-template">Скачать шаблон CSV</button><button class="button button-ghost" data-action="export-json">Экспорт JSON</button>${!cloudEnabled || cloudRole === "admin" ? `<button class="button button-ghost" data-action="reset-demo">Сбросить демо</button>` : ""}</div>
+        <div class="data-actions"><button class="button button-dark" data-action="download-template">Скачать шаблон CSV</button><button class="button button-ghost" data-action="export-json">Экспорт JSON</button><button class="button button-ghost" data-action="reset-demo">Сбросить моё демо</button></div>
         <div class="assumption-list" style="margin-top:22px"><div class="assumption"><i></i><span>Текущий источник</span><strong>${state.dataMode === "synthetic" ? "Синтетика" : "Импорт + демо"}</strong></div><div class="assumption"><i></i><span>Хранилище</span><strong>${cloudEnabled ? "Supabase" : "Браузер"}</strong></div><div class="assumption"><i></i><span>Импортированных записей</span><strong>${state.collections.filter((x)=>x.source==="import").length}</strong></div></div>
       </article>
     </section>
-    ${cloudEnabled ? `<section class="panel"><div class="panel-header"><div><h2>История изменений</h2><p class="table-sub">Новые версии сохраняются в базе. Восстановление создаёт следующую версию.</p></div></div><div class="table-wrap"><table><thead><tr><th>Версия</th><th>Когда</th><th>Сотрудник</th><th>Изменено</th><th></th></tr></thead><tbody>${historyRows.map((row) => `<tr><td>${formatNumber(row.revision)}</td><td>${new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short", timeZone: "Asia/Qyzylorda" }).format(new Date(row.changed_at))}</td><td>${h(row.actor_email || "Система")}</td><td>${h(changedLabel(row))}</td><td>${cloudRole === "admin" && Number(row.revision) !== Number(cloudRevision) ? `<button class="button button-ghost button-small" data-action="restore-revision" data-id="${Number(row.revision)}">Восстановить</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5"><div class="empty-state"><strong>История загружается</strong></div></td></tr>`}</tbody></table></div></section>` : ""}
+    <section class="panel panel-pad"><h2>Как устроено демо</h2><p>Данные сохраняются в Supabase отдельно для этого браузера. Другие посетители не видят ваши правки. Если очистить данные браузера, доступ к текущему демо пропадёт. Рабочая база сотрудников закрыта.</p></section>
     <section class="panel">
       <div class="panel-header"><div><h2>Формат файла</h2></div></div>
       <div class="table-wrap"><table><thead><tr><th>Точка</th><th>Дата</th><th>Напитки</th><th>Жмых кг</th><th>Что произойдёт</th></tr></thead><tbody><tr><td>Global Coffee — Абая</td><td>2026-11-06</td><td>238</td><td>7.7</td><td>Вес отмечается как измеренный</td></tr><tr><td>Global Coffee — Mega</td><td>2026-11-06</td><td>326</td><td>пусто</td><td>Вес оценивается по сценарию</td></tr></tbody></table></div>
@@ -570,69 +591,39 @@ function renderData() {
   </div>`;
 }
 
-function renderTeam() {
-  const date = (value) => new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Qyzylorda" }).format(new Date(value));
-  return `<div class="view-stack">
-    <section class="panel">
-      <div class="panel-header"><div><h2>Запросы на доступ</h2><p class="table-sub">Сотрудник регистрируется на сайте и подтверждает почту. После одобрения он сможет войти в рабочую базу.</p></div><span class="panel-meta">${teamData.requests.length}</span></div>
-      <div class="table-wrap"><table><thead><tr><th>Почта</th><th>Дата</th><th>Роль</th><th></th></tr></thead><tbody>
-        ${teamData.requests.map((request) => `<tr><td><span class="table-title">${h(request.email)}</span></td><td>${date(request.created_at)}</td><td><select class="team-role" data-approve-role="${h(request.user_id)}"><option value="operator">Оператор</option><option value="viewer">Наблюдатель</option></select></td><td><button class="button button-dark button-small" data-action="approve-member" data-id="${h(request.user_id)}">Добавить</button></td></tr>`).join("") || `<tr><td colspan="4"><div class="empty-state"><strong>Новых запросов нет</strong></div></td></tr>`}
-      </tbody></table></div>
-    </section>
-    <section class="panel">
-      <div class="panel-header"><div><h2>Сотрудники</h2><p class="table-sub">Оператор изменяет данные. Наблюдатель только просматривает.</p></div><span class="panel-meta">${teamData.members.length}</span></div>
-      <div class="table-wrap"><table><thead><tr><th>Почта</th><th>Добавлен</th><th>Роль</th></tr></thead><tbody>
-        ${teamData.members.map((member) => `<tr><td><span class="table-title">${h(member.email || member.user_id)}</span>${member.user_id === cloudUser.id ? `<span class="table-sub">Вы</span>` : ""}</td><td>${date(member.created_at)}</td><td><select class="team-role" data-member-role="${h(member.user_id)}" ${member.user_id === cloudUser.id ? "disabled title=\"Свою роль нельзя изменить здесь\"" : ""}><option value="admin" ${member.role === "admin" ? "selected" : ""}>Администратор</option><option value="operator" ${member.role === "operator" ? "selected" : ""}>Оператор</option><option value="viewer" ${member.role === "viewer" ? "selected" : ""}>Наблюдатель</option></select></td></tr>`).join("")}
-      </tbody></table></div>
-    </section>
-  </div>`;
-}
-
 function render() {
   viewTitle.textContent = viewMeta[state.currentView] || viewMeta.overview;
-  document.querySelector(".mode-line strong").textContent = cloudEnabled ? "Рабочая база" : "Демо-режим";
+  document.querySelector(".mode-line strong").textContent = "Личное демо";
   document.querySelector(".mode-line small").textContent = state.dataMode !== "synthetic" ? "Импорт + демо" : state.collections.some((item) => item.source === "manual") ? "Ручной ввод + демо" : "Синтетические данные";
-  globalScenario.value = state.scenario;
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === state.currentView));
-  const renderers = { overview: renderOverview, collections: renderCollections, logistics: renderLogistics, production: renderProduction, economics: renderEconomics, traceability: renderTraceability, data: renderData, team: renderTeam };
+  const renderers = { overview: renderOverview, collections: renderCollections, logistics: renderLogistics, production: renderProduction, economics: renderEconomics, traceability: renderTraceability, data: renderData };
   contentArea.innerHTML = (renderers[state.currentView] || renderOverview)();
-  if (cloudRole === "viewer" || cloudSaveBlocked) contentArea.querySelectorAll("button[data-action], input, textarea").forEach((control) => { control.disabled = true; });
-  document.querySelectorAll("[data-action='open-collection']").forEach((control) => { control.disabled = cloudRole === "viewer" || cloudSaveBlocked; });
-  globalScenario.disabled = cloudRole === "viewer" || cloudSaveBlocked;
+  if (cloudSaveBlocked) contentArea.querySelectorAll("button[data-action], input, textarea").forEach((control) => { control.disabled = true; });
+  document.querySelectorAll("[data-action='open-collection']").forEach((control) => { control.disabled = cloudSaveBlocked; });
   bindViewSpecificEvents();
 }
 
 function setView(view) {
-  if (view === "team" && cloudRole !== "admin") return;
   state.currentView = view;
   if (!cloudEnabled) saveState();
   render();
-  if (view === "data" && cloudEnabled && cloudUser) void refreshHistory().catch((error) => showToast(error.message));
   window.scrollTo({ top: 0, behavior: "smooth" });
   document.querySelector("#sidebar").classList.remove("open");
-}
-
-async function refreshHistory() {
-  historyRows = await readWorkspaceHistory();
-  if (state.currentView === "data") render();
-}
-
-async function restoreRevision(revision) {
-  if (cloudRole !== "admin" || cloudSaveBlocked) return;
-  if (!window.confirm(`Восстановить данные версии ${revision}? Текущая версия останется в истории.`)) return;
-  try {
-    const historical = await readWorkspaceSnapshot(Number(revision));
-    state = hydrateState({ ...historical, currentView: "data" });
-    render();
-    await saveState();
-    if (!cloudSaveBlocked) showToast(`Данные версии ${revision} восстановлены.`);
-  } catch (error) { showToast(error.message); }
 }
 
 function openCollectionDialog() {
   collectionStore.innerHTML = state.stores.filter((x) => x.active).map((store) => `<option value="${h(store.id)}">${h(store.name)}</option>`).join("");
   collectionDate.value = TODAY;
   collectionDialog.showModal();
+}
+
+function openSaleDialog() {
+  const available = state.batches.filter((batch) => batchStock(batch, state.sales).available > 0);
+  if (!available.length) return showToast("Нет готовой продукции для продажи.");
+  saleBatch.innerHTML = available.map((batch) => `<option value="${h(batch.id)}">${h(batch.id)} · ${batchStock(batch, state.sales).available} уп.</option>`).join("");
+  saleForm.elements.namedItem("unitPrice").value = state.economicsParams.pricePerPack;
+  saleForm.elements.namedItem("packs").value = 1;
+  saleDialog.showModal();
 }
 
 function applyScenario(key) {
@@ -644,7 +635,6 @@ function applyScenario(key) {
     ...state.economicsParams,
     activeStores: active.length,
     cupsPerStoreDay: Math.round(avg),
-    groundsPerPackG: 160,
     ...SCENARIOS[key],
   };
   saveState();
@@ -655,7 +645,7 @@ function createRoute() {
   const preview = buildPickupRoute(state.collections, state.stores);
   if (!preview.stops.length) return showToast("Нет готовых контейнеров для маршрута.");
   const route = {
-    id: `RT-${TODAY.replaceAll("-","")}-${String(state.routes.length+1).padStart(2,"0")}`,
+    id: `RT-${TODAY.replaceAll("-","")}-${crypto.randomUUID().slice(0, 6).toUpperCase()}`,
     date: TODAY,
     status: "planned",
     collectionIds: preview.stops.flatMap((x)=>x.collectionIds || [x.id]),
@@ -681,7 +671,7 @@ function createBatch() {
   const wetKg = round(items.reduce((s,x)=>s+x.wetKg,0),2);
   const process = state.economicsParams;
   const dry = calculateDryOutput(wetKg, process.dryYieldPct, process.rejectPct);
-  const id = `GL-${TODAY.slice(2).replaceAll("-","")}-${String.fromCharCode(65+state.batches.length)}`;
+  const id = `GL-${TODAY.slice(2).replaceAll("-","")}-${crypto.randomUUID().slice(0, 6).toUpperCase()}`;
   const batch = {
     id, createdAt: TODAY, collectionIds: items.map((x)=>x.id), sourceStores: [...new Set(items.map((x)=>x.storeId))], wetKg,
     dryYieldPct: process.dryYieldPct, rejectPct: process.rejectPct, driedKg: dry.driedKg, acceptedKg: dry.acceptedKg,
@@ -706,7 +696,7 @@ function createRun(id) {
   if (!batch || batch.status !== "complete" || batch.producedPacks) return;
   const output = calculatePackOutput(batch.acceptedKg, batch.groundsPerPackG, 100);
   batch.producedPacks = output.producedPacks;
-  state.productionRuns.push({ id:`PR-${String(state.productionRuns.length+1).padStart(3,"0")}`, batchId:id, date:TODAY, producedPacks:output.producedPacks, status:"complete" });
+  state.productionRuns.push({ id:`PR-${crypto.randomUUID().slice(0, 8).toUpperCase()}`, batchId:id, date:TODAY, producedPacks:output.producedPacks, status:"complete" });
   saveState(); render(); showToast(`Выпуск ${output.producedPacks} упаковок зафиксирован.`);
 }
 
@@ -720,7 +710,7 @@ function download(name, content, type="text/plain;charset=utf-8") {
 
 async function importFile(file) {
   try {
-    if (cloudRole === "viewer" || cloudSaveBlocked) return;
+    if (cloudSaveBlocked) return;
     if (!/\.(csv|xlsx|xls)$/i.test(file.name)) throw new Error("Поддерживаются только CSV и Excel.");
     if (file.size > 5 * 1024 * 1024) throw new Error("Файл больше 5 МБ. Разделите отчёт на части.");
     const bytes = await file.arrayBuffer();
@@ -747,7 +737,7 @@ async function importFile(file) {
         store = { id:`IMP-S-${crypto.randomUUID().slice(0, 8)}`, name:item.storeName, district:"Импорт", avgCups:item.cups, active:true };
         next.stores.push(store);
       }
-      next.collections.push({ ...item, storeId:store.id });
+      next.collections.push({ ...item, storeId:store.id, containerCode: `${store.id}-${item.date.replaceAll("-", "")}-${item.id.slice(-4)}`, storedAt: `${item.date}T09:00:00+05:00` });
     });
     next.dataMode = "mixed";
     next.lastImport = { fileName:file.name, rows:fresh.length, at:new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short",timeZone:"Asia/Qyzylorda"}).format(new Date()) };
@@ -788,31 +778,9 @@ function reviewCollection(id, approved) {
   saveState(); render(); showToast(approved ? "Качество подтверждено. Запись доступна для вывоза." : "Запись отклонена и исключена из вывоза.");
 }
 
-async function refreshTeam() {
-  if (cloudRole !== "admin") return;
-  teamData = await listTeam();
-  if (state.currentView === "team") render();
-}
-
-async function approveMember(id, button) {
-  const accessRequest = teamData.requests.find((entry) => entry.user_id === id);
-  if (!accessRequest) return;
-  const role = document.querySelector(`[data-approve-role="${id}"]`)?.value || "operator";
-  button.disabled = true;
-  try {
-    await approveTeamAccess(accessRequest, role);
-    await refreshTeam();
-    showToast(`${accessRequest.email}: доступ открыт.`);
-  } catch (error) {
-    button.disabled = false;
-    showToast(error.message);
-  }
-}
-
 document.querySelectorAll(".nav-item").forEach((item)=>item.addEventListener("click",()=>setView(item.dataset.view)));
 document.querySelector("#menuButton").addEventListener("click",()=>document.querySelector("#sidebar").classList.toggle("open"));
 document.querySelectorAll("[data-action='open-collection']").forEach((button)=>button.addEventListener("click",openCollectionDialog));
-globalScenario.addEventListener("change",()=>applyScenario(globalScenario.value));
 
 contentArea.addEventListener("click", (event) => {
   const button = event.target.closest("button");
@@ -823,8 +791,7 @@ contentArea.addEventListener("click", (event) => {
   if (action === "create-route") createRoute();
   if (action === "approve-collection") reviewCollection(id, true);
   if (action === "reject-collection") reviewCollection(id, false);
-  if (action === "approve-member") void approveMember(id, button);
-  if (action === "restore-revision") void restoreRevision(id);
+  if (action === "open-sale") openSaleDialog();
   if (action === "complete-route") completeRoute(id);
   if (action === "create-batch") createBatch();
   if (action === "advance-batch") advanceBatch(id);
@@ -835,14 +802,13 @@ contentArea.addEventListener("click", (event) => {
   if (action === "download-template") download("groundloop-template.csv", "Точка,Дата,Напитки,Жмых кг\nGlobal Coffee — Абая,2026-11-06,238,7.7\nGlobal Coffee — Mega,2026-11-06,326,\n", "text/csv;charset=utf-8");
   if (action === "export-json") download("groundloop-export.json", JSON.stringify(state,null,2), "application/json");
   if (action === "reset-demo") {
-    if (cloudEnabled && cloudRole !== "admin") return;
     if (window.confirm("Сбросить все изменения и вернуть исходные синтетические данные?")) { state=seedState(); saveState(); render(); showToast("Демо-данные восстановлены."); }
   }
 });
 
 collectionForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (cloudRole === "viewer" || cloudSaveBlocked) return;
+  if (cloudSaveBlocked) return;
   const data = new FormData(collectionForm);
   const storeId = data.get("storeId");
   const cups = Number(data.get("cups"));
@@ -855,48 +821,39 @@ collectionForm.addEventListener("submit", (event) => {
     id:`COL-${crypto.randomUUID().slice(0, 8).toUpperCase()}`, storeId, date:data.get("date"), cups, wetKg, quality,
     status: quality === "rejected" ? "rejected" : quality === "pending" ? "review" : "ready", weightSource: estimated ? "estimated" : "measured",
     source:"manual", note:data.get("note") || "",
+    containerCode: `${storeId}-${String(data.get("date")).replaceAll("-", "")}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`,
+    storedAt: String(data.get("date")) === TODAY ? new Date().toISOString() : `${data.get("date")}T09:00:00+05:00`,
   });
   saveState(); collectionDialog.close(); collectionForm.reset(); render(); showToast("Сбор добавлен в журнал.");
 });
 
+saleForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (cloudSaveBlocked) return;
+  const data = new FormData(saleForm);
+  const batch = state.batches.find((item) => item.id === data.get("batchId"));
+  const packs = Number(data.get("packs"));
+  const unitPrice = Number(data.get("unitPrice"));
+  try {
+    validateSaleDraft(batch, state.sales, packs, unitPrice);
+    state.sales.push({ id: `SL-${crypto.randomUUID().slice(0, 8).toUpperCase()}`, batchId: batch.id, date: TODAY, packs, unitPrice, channel: String(data.get("channel")), source: "synthetic" });
+    saveState(); saleDialog.close(); saleForm.reset(); render(); showToast(`${packs} упаковок записаны как продажа в демо.`);
+  } catch (error) { showToast(error.message); }
+});
+
 async function startCloud() {
-  const auth = document.querySelector("#authScreen");
   const app = document.querySelector(".app-shell");
   if (!cloudEnabled) {
-    auth.hidden = true;
     app.hidden = false;
     render();
     return;
   }
   app.hidden = true;
-  auth.hidden = false;
-  if (await acceptInviteSession()) {
-    document.querySelector("#authForm").hidden = true;
-    document.querySelector("#signUp").hidden = true;
-    document.querySelector("#recoverPassword").hidden = true;
-    document.querySelector("#inviteForm").hidden = false;
-    document.querySelector("#authMessage").textContent = "Установите пароль для входа";
-    return;
-  }
-  cloudUser = await restoreSession();
-  if (!cloudUser) return;
-  cloudRole = await getMembership(cloudUser.id);
-  if (!cloudRole) {
-    try {
-      await requestTeamAccess(cloudUser);
-      document.querySelector("#authMessage").textContent = "Заявка на доступ отправлена. После одобрения администратором войдите снова.";
-    } catch (error) {
-      document.querySelector("#authMessage").textContent = `Аккаунт создан, но заявка не отправлена: ${error.message}`;
-    }
-    document.querySelector("#authSignOut").hidden = false;
-    return;
-  }
-  document.querySelector('[data-view="team"]').hidden = cloudRole !== "admin";
-  let teamLoadError = null;
-  if (cloudRole === "admin") await refreshTeam().catch((error) => { teamLoadError = error; });
-  let remote = await readWorkspace();
-  if (!remote && cloudRole !== "viewer") remote = await createWorkspace(seedState(), cloudUser.id);
-  if (!remote) return;
+  document.querySelector("#syncStatus").textContent = "Подключение…";
+  cloudUser = await openDemoSession();
+  let remote = await readWorkspace(cloudUser.id);
+  if (!remote) remote = await createWorkspace(seedState(), cloudUser.id);
+  if (!remote) throw new Error("Демо-данные недоступны");
   state = hydrateState({ ...remote.state, currentView: "overview" });
   cloudRevision = remote.revision;
   cloudBaseState = structuredClone(remote.state);
@@ -904,95 +861,17 @@ async function startCloud() {
   lastQueuedState = structuredClone(cloudBaseState);
   cloudSaveBlocked = false;
   app.hidden = false;
-  auth.hidden = true;
-  document.querySelector("#syncStatus").textContent = "Сохранено в Supabase";
-  document.querySelector("#signOut").hidden = false;
+  document.querySelector("#syncStatus").textContent = "Сохранено";
   document.querySelector("#reloadWorkspace").hidden = false;
+  document.querySelector("#reloadWorkspace").textContent = "Обновить данные";
   render();
-  if (teamLoadError) showToast(`Команда не загружена: ${teamLoadError.message}`);
 }
 
 document.querySelector("#reloadWorkspace").addEventListener("click", () => location.reload());
-
-contentArea.addEventListener("change", async (event) => {
-  const select = event.target.closest("[data-member-role]");
-  if (!select || cloudRole !== "admin" || select.dataset.memberRole === cloudUser.id) return;
-  select.disabled = true;
-  try {
-    await updateTeamRole(select.dataset.memberRole, select.value);
-    await refreshTeam();
-    showToast("Роль сотрудника обновлена.");
-  } catch (error) {
-    await refreshTeam().catch(() => {});
-    showToast(error.message);
-  }
+startCloud().catch((error) => {
+  document.querySelector(".app-shell").hidden = false;
+  document.querySelector("#syncStatus").textContent = `Ошибка подключения: ${error.message}`;
+  document.querySelector("#reloadWorkspace").hidden = false;
+  cloudSaveBlocked = true;
+  render();
 });
-
-document.querySelector("#inviteForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const message = document.querySelector("#authMessage");
-  const button = form.querySelector("button[type=submit]");
-  button.disabled = true;
-  try {
-    await updatePassword(form.elements.namedItem("password").value);
-    form.hidden = true;
-    document.querySelector("#authForm").hidden = false;
-    document.querySelector("#signUp").hidden = false;
-    document.querySelector("#recoverPassword").hidden = false;
-    message.textContent = "Пароль установлен";
-    await startCloud();
-  } catch (error) { message.textContent = error.message; }
-  finally { button.disabled = false; }
-});
-
-document.querySelector("#authForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const message = document.querySelector("#authMessage");
-  const form = event.currentTarget;
-  const button = form.querySelector("button[type=submit]");
-  button.disabled = true;
-  message.textContent = "Проверка…";
-  try {
-    await signIn(form.elements.namedItem("email").value, form.elements.namedItem("password").value);
-    await startCloud();
-  } catch (error) { message.textContent = error.message; }
-  finally { button.disabled = false; }
-});
-
-document.querySelector("#signUp").addEventListener("click", async () => {
-  const form = document.querySelector("#authForm");
-  const message = document.querySelector("#authMessage");
-  try {
-    if (!form.reportValidity()) return;
-    await signUp(form.elements.namedItem("email").value, form.elements.namedItem("password").value);
-    message.textContent = "Проверьте почту для подтверждения, затем войдите";
-  } catch (error) { message.textContent = error.message; }
-});
-
-document.querySelector("#recoverPassword").addEventListener("click", async () => {
-  const input = document.querySelector("#authForm input[name=email]");
-  const message = document.querySelector("#authMessage");
-  if (!input.reportValidity()) return;
-  try {
-    await requestPasswordRecovery(input.value);
-    message.textContent = "Ссылка для установки нового пароля отправлена на почту";
-  } catch (error) { message.textContent = error.message; }
-});
-
-document.querySelector("#signOut").addEventListener("click", async () => {
-  await signOut();
-  cloudUser = null;
-  cloudRole = null;
-  await startCloud();
-});
-
-document.querySelector("#authSignOut").addEventListener("click", async () => {
-  await signOut();
-  cloudUser = null;
-  cloudRole = null;
-  document.querySelector("#authSignOut").hidden = true;
-  document.querySelector("#authMessage").textContent = "";
-});
-
-startCloud().catch((error) => { document.querySelector("#authMessage").textContent = error.message; });

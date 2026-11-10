@@ -216,6 +216,21 @@ export function buildPickupRoute(collections, stores) {
   };
 }
 
+export function batchStock(batch, sales = []) {
+  const produced = Number(batch?.producedPacks || 0);
+  const sold = sales.filter((sale) => sale.batchId === batch?.id).reduce((sum, sale) => sum + Number(sale.packs || 0), 0);
+  return { produced, sold, available: Math.max(0, produced - sold) };
+}
+
+export function validateSaleDraft(batch, sales, packs, unitPrice) {
+  if (!batch || !Number.isInteger(packs) || packs <= 0) throw new Error("Укажите партию и целое число упаковок больше нуля.");
+  if (!Number.isFinite(unitPrice) || unitPrice < 0) throw new Error("Укажите неотрицательную цену.");
+  const stock = batchStock(batch, sales);
+  if (stock.produced <= 0) throw new Error("Сначала зафиксируйте выпуск партии.");
+  if (packs > stock.available) throw new Error(`На складе осталось ${stock.available} упаковок.`);
+  return stock;
+}
+
 export function sameValue(a, b) {
   if (Object.is(a, b)) return true;
   if (Array.isArray(a) || Array.isArray(b)) {
@@ -254,7 +269,7 @@ function mergeRecordList(name, base, local, remote) {
 export function mergeWorkspaceState(base, local, remote) {
   if (sameValue(base, remote)) return structuredClone(local);
   const merged = structuredClone(remote);
-  const recordLists = new Set(["stores", "collections", "routes", "batches", "productionRuns"]);
+  const recordLists = new Set(["stores", "collections", "routes", "batches", "productionRuns", "sales"]);
   for (const key of new Set([...Object.keys(base), ...Object.keys(local)])) {
     if (sameValue(base[key], local[key])) continue;
     if (recordLists.has(key) && Array.isArray(base[key]) && Array.isArray(local[key]) && Array.isArray(remote[key])) {
