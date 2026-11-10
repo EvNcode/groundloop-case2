@@ -29,7 +29,8 @@ let toastTimer;
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const money = n => `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(Number(n) || 0)} ₸`;
-const number = (n, digits = 1) => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: digits }).format(Number(n) || 0);
+const number = (n, digits = 2) => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: digits }).format(Number(n) || 0);
+const word = (n, one, few, many) => { const x = Math.abs(Number(n)) % 100, last = x % 10; return x >= 11 && x <= 14 ? many : last === 1 ? one : last >= 2 && last <= 4 ? few : many; };
 const dateTime = value => value ? new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Qyzylorda' }).format(new Date(value)) : '—';
 const storeName = id => records.stores.find(s => s.id === id)?.name || id;
 const byNewest = (a, b) => new Date(b.created_at) - new Date(a.created_at);
@@ -81,8 +82,8 @@ async function run(task, success) {
   busy = true;
   try {
     await task();
-    closeModal();
     await refresh();
+    closeModal();
     if (success) toast(success);
   } catch (error) {
     console.error(error);
@@ -199,7 +200,7 @@ function containerItem(item, role) {
     if (item.status === 'picked_up') actions = button('Сканировать приёмку', 'receive', `data-id="${item.id}"`, 'btn-sm btn-primary');
     if (item.status === 'received') actions = button('Отменить приёмку', 'undo-receive', `data-id="${item.id}"`, 'btn-sm btn-danger');
   }
-  return `<article class="item"><div class="item-top"><div><div class="item-title mono">${esc(item.code)}</div><div class="item-sub">${owner}</div></div>${badge(item.status)}</div><div class="item-meta"><span><strong>${number(item.wet_kg)} кг</strong></span><span>${item.cups ? `${number(item.cups,0)} напитков` : 'Вес измерен'}</span><span>${dateTime(item.created_at)}</span></div>${note}${actions ? `<div class="item-actions">${actions}</div>` : ''}</article>`;
+  return `<article class="item"><div class="item-top"><div><div class="item-title mono">${esc(item.code)}</div><div class="item-sub">${owner}</div></div>${badge(item.status)}</div><div class="item-meta"><span><strong>${number(item.wet_kg)} кг</strong></span><span>${item.cups ? `${number(item.cups,0)} ${word(item.cups,'напиток','напитка','напитков')}` : 'Вес измерен'}</span><span>${dateTime(item.created_at)}</span></div>${note}${actions ? `<div class="item-actions">${actions}</div>` : ''}</article>`;
 }
 
 function renderBarista() {
@@ -294,7 +295,7 @@ function batchItem(batch) {
     if (batch.status === 'drying') actions = button('Подтвердить сухой вес','dry-weight',`data-id="${batch.id}"`,'btn-sm btn-primary');
     if (batch.status === 'production') actions = button('Зафиксировать выпуск','pack-output',`data-id="${batch.id}"`,'btn-sm btn-primary');
   }
-  return `<article class="item"><div class="item-top"><div><div class="item-title mono">${esc(batch.code)}</div><div class="item-sub">${esc(batch.operator_name)} · ${dateTime(batch.created_at)}</div></div>${badge(batch.status)}</div><div class="item-meta"><span>${number(batch.wet_kg)} кг принято</span><span>${batch.container_ids.length} контейнеров</span>${batch.accepted_kg!=null?`<span>${number(batch.accepted_kg)} кг после контроля</span>`:''}</div>${batch.status==='complete'?`<div class="split-values"><div><span>Произведено</span><strong>${batch.produced_packs} уп.</strong></div><div><span>Остаток</span><strong>${available} уп.</strong></div></div>`:''}${actions?`<div class="item-actions">${actions}</div>`:''}</article>`;
+  return `<article class="item"><div class="item-top"><div><div class="item-title mono">${esc(batch.code)}</div><div class="item-sub">${esc(batch.operator_name)} · ${dateTime(batch.created_at)}</div></div>${badge(batch.status)}</div><div class="item-meta"><span>${number(batch.wet_kg)} кг принято</span><span>${batch.container_ids.length} ${word(batch.container_ids.length,'контейнер','контейнера','контейнеров')}</span>${batch.accepted_kg!=null?`<span>${number(batch.accepted_kg)} кг после контроля</span>`:''}</div>${batch.status==='complete'?`<div class="split-values"><div><span>Произведено</span><strong>${batch.produced_packs} уп.</strong></div><div><span>Остаток</span><strong>${available} уп.</strong></div></div>`:''}${actions?`<div class="item-actions">${actions}</div>`:''}</article>`;
 }
 function renderProduction() {
   const incoming = records.containers.filter(x => x.status === 'picked_up').sort(byNewest);
@@ -349,7 +350,7 @@ function renderManagement() {
     const available=records.batches.filter(b=>b.status==='complete'&&b.produced_packs-records.sales.filter(s=>s.batch_id===b.id).reduce((sum,s)=>sum+s.packs,0)>0);
     body += `<section class="stats">${stat('Произведено',`${produced} уп.`)}${stat('Продано',`${sold} уп.`)}${stat('Остаток',`${produced-sold} уп.`)}${stat('Выручка',money(revenue))}</section><div class="grid"><section class="card"><div class="card-head"><div><h2>Операции продаж</h2><p>Партия, количество и выручка</p></div></div>${[...records.sales].sort(byNewest).map(s=>`<div class="item"><div class="item-top"><div><div class="item-title mono">${esc(records.batches.find(b=>b.id===s.batch_id)?.code||s.batch_id)}</div><div class="item-sub">${esc(s.channel)} · ${dateTime(s.created_at)}</div></div><strong>${money(s.packs*Number(s.unit_price))}</strong></div><div class="item-meta"><span>${s.packs} уп.</span><span>${money(s.unit_price)} за упаковку</span></div></div>`).join('')||empty('Продаж ещё нет','Зафиксируйте первую выдачу готового продукта.')}</section><aside class="stack"><section class="card"><div class="card-head"><h2>Новая продажа</h2></div><div class="card-body"><form id="saleForm" class="form"><label class="field">Партия<select name="batch_id" required>${available.map(b=>`<option value="${b.id}">${esc(b.code)} · ${b.produced_packs-records.sales.filter(s=>s.batch_id===b.id).reduce((sum,s)=>sum+s.packs,0)} уп.</option>`).join('')}</select></label><label class="field">Упаковок<input name="packs" type="number" min="1" step="1" inputmode="numeric" required></label><label class="field">Цена за упаковку, ₸<input name="unit_price" type="number" min="0" step="1" inputmode="numeric" required></label><label class="field">Канал<select name="channel"><option>Кофейня</option><option>Партнёрская точка</option><option>Прямой заказ</option></select></label><button class="btn btn-primary" type="submit" ${available.length?'':'disabled'}>Зафиксировать продажу</button></form></div></section></aside></div>`;
   }
-  shell('Управление', 'Сотрудники выполняют свои операции, здесь виден их результат и доступ команды.', '', body);
+  shell('Управление', staff.can_manage_access ? 'Результаты работы команды, доступ сотрудников и точки сбора.' : 'Поток материала, рейсы, производство и продажи в одной сводке.', '', body);
 }
 function eventLabel(action, entity) { const subject=({gl_containers:'Контейнер',gl_trips:'Рейс',gl_batches:'Партия',gl_sales:'Продажа'})[entity]||'Операция'; return `${subject}: ${({created:'создано',updated:'исправлено',ready:'готово к вывозу',hold:'удержано',rejected:'отклонено',cancelled:'отменено',assigned:'добавлено в рейс',picked_up:'вывоз подтверждён',received:'принято в цех',batched:'включено в партию',drying:'сушка начата',production:'вес подтверждён',complete:'выпуск завершён'})[action]||action}`; }
 function render() { if (!staff) return; if (staff.role==='barista') renderBarista(); else if (staff.role==='logistics') renderLogistics(); else if (staff.role==='production') renderProduction(); else renderManagement(); }
