@@ -156,7 +156,7 @@ body[data-theme="dark"] .card-head,body[data-theme="dark"] .item,body[data-theme
 body[data-theme="dark"] .tab{color:#a5b9ad}body[data-theme="dark"] .tab:hover,body[data-theme="dark"] .map-stop:hover{background:#293a2f;color:#e9f4eb}
 body[data-theme="dark"] .tab.active,body[data-theme="dark"] .map-stop.selected,body[data-theme="dark"] .trip-choice.selected{background:#254535;color:#a9e1bd}
 body[data-theme="dark"] .btn,body[data-theme="dark"] .theme-toggle,body[data-theme="dark"] .trip-choice,body[data-theme="dark"] .map-styles,body[data-theme="dark"] .map-style.selected{background:#26362c;color:#dcece0;border-color:#455b4c;box-shadow:none}
-body[data-theme="dark"] .top .theme-toggle{color:#f0fff4}
+body[data-theme="dark"] .theme-toggle{color:#f0fff4!important}
 body[data-theme="dark"] .btn:hover,body[data-theme="dark"] .theme-toggle:hover{background:#344c3a}
 body[data-theme="dark"] .btn-primary,body[data-theme="dark"] .btn-primary:hover{background:#278653;border-color:#278653;color:#fff}
 body[data-theme="dark"] .btn-danger{color:#efaa9d;border-color:#76544a}
