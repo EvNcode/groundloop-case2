@@ -38,6 +38,7 @@ let historyHasMore = false;
 let historyLoading = false;
 let historyDirty = false;
 let historyTimer;
+let saleDraft = null;
 let routeCache = new Map();
 document.body.dataset.theme = theme;
 let gpsAttemptedTrip = null;
@@ -93,12 +94,21 @@ function toast(message) {
 }
 function brand() { return `<a class="brand" href="./index.html">GroundLoop<span class="brand-dot" aria-hidden="true">.</span></a>`; }
 function shell(title, subtitle, actions, body) {
+  const previousSaleForm=document.querySelector('#saleForm');
+  if(previousSaleForm) saleDraft=Object.fromEntries(new FormData(previousSaleForm));
   if (activeMap?.remove) activeMap.remove();
   activeMap = null; activeBaseLayer = null;
   app.innerHTML = `<div class="shell"><header class="top"><div class="top-inner">${brand()}<div class="top-context"><span class="top-divider"></span><span>Шымкент</span></div><div class="top-right"><button class="theme-toggle" data-action="toggle-theme" aria-label="${theme==='dark'?'Включить светлую тему':'Включить тёмную тему'}" title="${theme==='dark'?'Светлая тема':'Тёмная тема'}">${theme==='dark'?'☀':'◐'}<span>${theme==='dark'?'Светлая':'Тёмная'}</span></button><div class="top-user"><strong>${esc(staff.full_name)}</strong><small>${esc(user.email)}</small></div><button data-action="logout">Выйти</button></div></div></header><main class="container"><section class="hero"><div><div class="eyebrow">${esc(pageNames[staff.role])}${staff.store_id ? ` / ${esc(storeName(staff.store_id))}` : ''}</div><h1>${esc(title)}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="hero-actions">${actions || ''}</div></section><div class="workspace">${body}</div></main></div>`;
   const workspace=app.querySelector('.workspace');
   const nav=workspace.querySelector(':scope > .tabs');
   if(nav){const main=document.createElement('div');main.className='workspace-main';for(const child of [...workspace.children])if(child!==nav)main.append(child);workspace.append(main);}
+  const nextSaleForm=document.querySelector('#saleForm');
+  if(nextSaleForm&&saleDraft){
+    for(const [name,value] of Object.entries(saleDraft)){
+      const field=nextSaleForm.elements.namedItem(name);
+      if(field&&('value' in field)&&(!(field instanceof HTMLSelectElement)||[...field.options].some(option=>option.value===value))) field.value=value;
+    }
+  }
   syncDeliveryField();
   if (document.querySelector('#operationsMap')) requestAnimationFrame(() => void drawOperationsMap());
 }
@@ -142,16 +152,19 @@ function closeModal() {
   if (dialog) { dialog.close(); dialog.remove(); }
 }
 async function run(task, success) {
-  if (busy) return;
+  if (busy) return false;
   busy = true;
   try {
     await task();
     await refresh();
     closeModal();
+    render();
     if (success) toast(success);
+    return true;
   } catch (error) {
     console.error(error);
     toast(error.message || 'Операция не выполнена');
+    return false;
   } finally { busy = false; }
 }
 function checked(result) { if (result.error) throw result.error; return result.data; }
@@ -169,8 +182,7 @@ async function loadSalesHistory(append=false) {
     else salesHistory=rows.slice(0,25);
     historyOffset=offset+Math.min(rows.length,25);
     historyHasMore=rows.length>25;
-    if(activeTab==='sales' && !document.activeElement?.closest('#historySearch')) render();
-    else updateHistoryResults();
+    updateHistoryResults();
   } catch(error) { console.error(error);toast('Историю передач не удалось загрузить'); }
   finally { historyLoading=false; if(historyDirty){historyDirty=false;void loadSalesHistory(false);} }
 }
@@ -248,33 +260,40 @@ async function boot() {
 }
 
 async function qrDialog(item) {
-  const image = await QRCode.toDataURL(item.code, { width: 320, margin: 1, color: { dark: '#17271d', light: '#ffffff' } });
-  modal('Код контейнера', `<img class="qr-image" src="${image}" alt="QR-код ${esc(item.code)}"><div class="qr-code">${esc(item.code)}</div><p class="muted" style="text-align:center">Покажите код логисту при передаче контейнера. Он проверит его сканированием.</p><div class="form-actions"><button class="btn" data-action="print-code">Печать</button><button class="btn btn-primary" data-action="close-modal">Закрыть</button></div>`);
+  try {
+    const secret=checked(await supabase.rpc('gl_get_container_qr',{target_id:item.id}));
+    const image = await QRCode.toDataURL(secret, { width: 320, margin: 1, color: { dark: '#17271d', light: '#ffffff' } });
+    const instruction=staff.role==='barista'?'Покажите этот QR логисту при передаче контейнера.':'Покажите этот QR сотруднику цеха при приёмке.';
+    modal(`Заявка №${item.code}`, `<img class="qr-image" src="${image}" alt="QR-код заявки №${esc(item.code)}"><div class="qr-code">${esc(secret.match(/.{1,4}/g).join('-'))}</div><p class="muted" style="text-align:center">${instruction} Код передачи отличается от номера заявки.</p><div class="form-actions"><button class="btn" data-action="print-code">Печать</button><button class="btn btn-primary" data-action="close-modal">Закрыть</button></div>`);
+  } catch(error) { toast(error.message||'QR не удалось открыть'); }
 }
 async function scanDialog(item, kind) {
   const isPickup = kind === 'pickup';
   const dialog = modal(isPickup ? 'Подтвердить вывоз' : 'Принять в цех',
-    `<div class="notice">Ожидается контейнер <strong class="mono">${esc(item.code)}</strong> · ${esc(storeName(item.store_id))} · ${number(item.wet_kg)} кг</div><video class="scan-video" id="scanVideo" autoplay muted playsinline></video><p class="scan-hint" id="scanHint">Наведите камеру на QR-код. Если камеры нет, введите код с этикетки.</p><form id="scanForm" class="form"><label class="field">Код на контейнере<input name="code" class="scan-input mono" autocomplete="off" autocapitalize="characters" required placeholder="GC-XXXXXXXXXX"></label><div class="form-actions"><button class="btn" type="button" data-action="close-modal">Отмена</button><button class="btn btn-primary" type="submit">Подтвердить</button></div></form>`);
+    `<div class="notice">Заявка №<strong class="mono">${esc(item.code)}</strong> · ${esc(storeName(item.store_id))} · ${number(item.wet_kg)} кг</div><video class="scan-video" id="scanVideo" autoplay muted playsinline></video><p class="scan-hint" id="scanHint">Наведите камеру на QR. Если камеры нет, введите закрытый код передачи с этикетки.</p><form id="scanForm" class="form"><label class="field">Код передачи<input name="code" class="scan-input mono" autocomplete="off" autocapitalize="characters" required placeholder="XXXX-XXXX-XXXX-XXXX"></label><div class="form-actions"><button class="btn" type="button" data-action="close-modal">Отмена</button><button class="btn btn-primary" type="submit">Подтвердить</button></div></form>`);
   let controls;
   dialog.addEventListener('close', () => controls?.stop(), { once: true });
   const form = dialog.querySelector('#scanForm');
-  form.addEventListener('submit', event => { event.preventDefault(); void completeScan(item, kind, form.elements.code.value); });
+  let scanning=false,lastCandidate='';
+  const submit=async raw=>{if(scanning)return;scanning=true;const ok=await completeScan(item,kind,raw);if(ok)controls?.stop();scanning=false;};
+  form.addEventListener('submit', event => { event.preventDefault(); void submit(form.elements.code.value); });
   try {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('Камера недоступна');
     const reader = new BrowserQRCodeReader();
     controls = await reader.decodeFromVideoDevice(undefined, dialog.querySelector('#scanVideo'), (result) => {
       if (!result) return;
-      const code = result.getText().trim().toUpperCase();
+      const code = result.getText().trim().toUpperCase().replaceAll('-','');
+      if(code===lastCandidate)return;
+      lastCandidate=code;
       form.elements.code.value = code;
-      if (code === item.code) { controls?.stop(); void completeScan(item, kind, code); }
-      else dialog.querySelector('#scanHint').textContent = `Считан ${code}. Это другой контейнер.`;
+      void submit(code);
     });
   } catch { dialog.querySelector('#scanHint').textContent = 'Камера недоступна. Введите код с этикетки вручную.'; }
 }
 async function completeScan(item, kind, rawCode) {
-  const code = String(rawCode || '').trim().toUpperCase();
-  if (code !== item.code) return toast('Код не совпадает с выбранным контейнером');
-  await run(async () => {
+  const code = String(rawCode || '').trim().toUpperCase().replaceAll('-','');
+  if (!/^[0-9A-F]{16}$/.test(code)) {toast('Введите 16 символов кода передачи');return false;}
+  return run(async () => {
     const change = kind === 'pickup'
       ? { status: 'picked_up', pickup_code: code }
       : { status: 'received', receipt_code: code };
@@ -291,7 +310,7 @@ function containerItem(item, role) {
   const note = role === 'barista' && item.note && item.status !== 'ready' ? `<div class="item-note">${esc(item.note)}</div>` : '';
   let actions = '';
   if (role === 'barista') {
-    actions = `${button('Показать QR', 'qr', `data-id="${item.id}"`, 'btn-sm')}`;
+    if(['ready','assigned'].includes(item.status)) actions = `${button('Показать QR', 'qr', `data-id="${item.id}"`, 'btn-sm')}`;
     if (item.store_id === staff.store_id && ['ready','hold','rejected'].includes(item.status)) {
       actions += `${button('Исправить', 'edit-container', `data-id="${item.id}"`, 'btn-sm')}${button('Отменить заявку', 'cancel-container', `data-id="${item.id}"`, 'btn-sm btn-danger')}`;
     } else if (item.store_id === staff.store_id && item.status === 'assigned') {
@@ -302,7 +321,7 @@ function containerItem(item, role) {
     const trip = myTrip();
     if (item.status === 'ready' && trip) actions = button('Добавить в рейс', 'assign', `data-id="${item.id}"`, 'btn-sm btn-primary');
     if (item.status === 'assigned' && item.trip_id === trip?.id) actions = `${button('Сканировать и забрать', 'pickup', `data-id="${item.id}"`, 'btn-sm btn-primary')}${button('Убрать из рейса', 'unassign', `data-id="${item.id}"`, 'btn-sm')}`;
-    if (item.status === 'picked_up' && item.trip_id === trip?.id) actions = button('Отменить вывоз', 'undo-pickup', `data-id="${item.id}"`, 'btn-sm btn-danger');
+    if (item.status === 'picked_up' && item.trip_id === trip?.id) actions = `${button('Показать QR для цеха', 'qr', `data-id="${item.id}"`, 'btn-sm')}${button('Отменить вывоз', 'undo-pickup', `data-id="${item.id}"`, 'btn-sm btn-danger')}`;
   }
   if (role === 'production') {
     if (item.status === 'picked_up') actions = button('Сканировать приёмку', 'receive', `data-id="${item.id}"`, 'btn-sm btn-primary');
@@ -521,7 +540,7 @@ function renderLogistics() {
     const archive = records.containers.filter(x=>x.trip_id&&records.trips.some(t=>t.id===x.trip_id&&t.driver_id===user.id)&&archivedContainer(x)).sort(byNewest);
     body += `<section class="card"><div class="card-head"><h2>Архив вывоза</h2></div>${archive.length?archive.map(x=>containerItem(x,'logistics')).join(''):empty('Архив пока пуст','Завершённые заявки переходят сюда через 24 часа.')}</section>`;
   } else {
-    body += `<div class="shift-strip"><span><strong>${ready.length}</strong> готово к вывозу</span><span><strong>${inTransit.length}</strong> в рейсе</span><span><strong>${mine.filter(x=>x.status==='picked_up').length}</strong> забрано</span></div><div class="grid logistics-grid"><section class="card"><div class="card-head"><div><h2>Мой рейс</h2><p>${esc(trip?.code||'Рейс не начат')}</p></div>${trip && !inTransit.length && !pendingDeliveries.length ? button('Завершить рейс','finish-trip','','btn-sm') : ''}</div>${mine.length?mine.filter(x=>!archivedContainer(x)).map(x=>containerItem(x,'logistics')).join(''):empty('Рейс пуст','Добавьте заявку из очереди.')}</section><section class="card"><div class="card-head"><h2>Новые заявки</h2></div>${ready.length?ready.map(x=>containerItem(x,'logistics')).join(''):empty('Новых заявок нет','Очередь обновится автоматически.')}</section></div>`;
+    body += `<div class="shift-strip"><span><strong>${ready.length}</strong> готово к вывозу</span><span><strong>${inTransit.length}</strong> в рейсе</span><span><strong>${mine.filter(x=>x.status==='picked_up').length}</strong> забрано</span></div><div class="grid logistics-grid"><section class="card"><div class="card-head"><div><h2>Мой рейс</h2><p>${esc(trip?.code||'Рейс не начат')}</p></div>${trip && !mine.length && !pendingDeliveries.length ? button('Отменить пустой рейс','cancel-trip','','btn-sm') : ''}</div>${mine.length?mine.filter(x=>!archivedContainer(x)).map(x=>containerItem(x,'logistics')).join(''):empty('Рейс пуст','Добавьте заявку из очереди.')}</section><section class="card"><div class="card-head"><h2>Новые заявки</h2></div>${ready.length?ready.map(x=>containerItem(x,'logistics')).join(''):empty('Новых заявок нет','Очередь обновится автоматически.')}</section></div>`;
   }
   const heroAction = !trip && ['requests','deliveries'].includes(activeTab) ? button('Начать рейс','start-trip','','btn-primary') : trip && watchId===null ? button('Включить GPS','start-gps','','btn-primary') : '';
   shell(({requests:'Вывоз заявок',map:'Карта рейса',deliveries:'Доставка продукта',archive:'История вывоза'})[activeTab], '', heroAction, body);
@@ -551,7 +570,7 @@ function productOrderItem(order, role) {
   if (role === 'logistics' && order.fulfillment === 'delivery') {
     if (order.delivery_status === 'ready') actions = myTrip() ? button('Взять доставку','claim-delivery',`data-id="${order.id}"`,'btn-sm btn-primary') : '<span class="muted">Начните рейс, чтобы взять доставку</span>';
     if (order.delivery_driver_id === user.id && order.delivery_status === 'assigned') actions = `${button('Сканировать выдачу','scan-product',`data-id="${order.id}"`,'btn-sm btn-primary')}${button('Вернуть в очередь','release-delivery',`data-id="${order.id}"`,'btn-sm')}`;
-    if (order.delivery_driver_id === user.id && order.delivery_status === 'out_for_delivery') actions = button('Передать покупателю','complete-delivery',`data-id="${order.id}"`,'btn-sm btn-primary');
+    if (order.delivery_driver_id === user.id && order.delivery_status === 'out_for_delivery') actions = `${button('Передать покупателю','complete-delivery',`data-id="${order.id}"`,'btn-sm btn-primary')}${button('Показать QR','product-qr',`data-id="${order.id}"`,'btn-sm')}`;
   }
   if (role === 'production' && order.fulfillment === 'delivery' && ['ready','assigned'].includes(order.delivery_status)) actions = button('Показать QR','product-qr',`data-id="${order.id}"`,'btn-sm');
   if (role === 'manager') {
@@ -561,20 +580,25 @@ function productOrderItem(order, role) {
   return `<article class="item"><div class="item-top"><div><div class="item-title mono">${esc(order.order_code||'Продажа')} · ${esc(order.customer_name||order.channel)}</div><div class="item-sub">${esc(records.batches.find(b=>b.id===order.batch_id)?.code||'Партия')} · ${order.packs} уп. · ${money(order.unit_price)}</div></div>${badge(order.delivery_status)}</div><div class="item-meta"><span>${order.fulfillment==='delivery'?'Доставка':'Самовывоз'}</span>${order.delivery_address?`<span>${esc(order.delivery_address)}</span>`:''}${order.delivery_driver_name?`<span>${esc(order.delivery_driver_name)}</span>`:''}${order.recipient_name?`<span>Получил: ${esc(order.recipient_name)}</span>`:''}<span>${dateTime(order.created_at)}</span></div>${legacy?'':actions?`<div class="item-actions">${actions}</div>`:''}</article>`;
 }
 async function productQrDialog(order) {
-  const image = await QRCode.toDataURL(order.order_code, { width: 320, margin: 1, color: { dark: '#17271d', light: '#ffffff' } });
-  modal('Выдача продукта',`<img class="qr-image" src="${image}" alt="QR-код ${esc(order.order_code)}"><div class="qr-code">${esc(order.order_code)}</div><p class="muted" style="text-align:center">Логист сканирует код при получении партии.</p><div class="form-actions"><button class="btn" data-action="print-code">Печать</button><button class="btn btn-primary" data-action="close-modal">Закрыть</button></div>`);
+  try {
+    const secret=checked(await supabase.rpc('gl_get_sale_qr',{target_id:order.id}));
+    const image=await QRCode.toDataURL(secret,{width:320,margin:1,color:{dark:'#17271d',light:'#ffffff'}});
+    const instruction=staff.role==='production'?'Логист сканирует этот QR при получении партии.':'Код выдачи этой партии.';
+    modal(`Продукт №${order.order_code}`,`<img class="qr-image" src="${image}" alt="QR-код продукта №${esc(order.order_code)}"><div class="qr-code">${esc(secret.match(/.{1,4}/g).join('-'))}</div><p class="muted" style="text-align:center">${instruction} Номер заявки отличается от кода передачи.</p><div class="form-actions"><button class="btn" data-action="print-code">Печать</button><button class="btn btn-primary" data-action="close-modal">Закрыть</button></div>`);
+  }catch(error){toast(error.message||'QR не удалось открыть');}
 }
 async function productScanDialog(order) {
-  const dialog=modal('Получить продукт',`<div class="notice">${esc(order.order_code)} · ${esc(order.customer_name)} · ${order.packs} уп.</div><video class="scan-video" id="scanVideo" autoplay muted playsinline></video><p class="scan-hint" id="scanHint">Сканируйте код на партии или введите его с этикетки.</p><form id="scanProductForm" class="form"><label class="field">Код выдачи<input name="code" class="scan-input mono" required autocomplete="off"></label><div class="form-actions"><button class="btn" data-action="close-modal" type="button">Отмена</button><button class="btn btn-primary" type="submit">Подтвердить выдачу</button></div></form>`);
+  const dialog=modal('Получить продукт',`<div class="notice">Заявка №${esc(order.order_code)} · ${esc(order.customer_name)} · ${order.packs} уп.</div><video class="scan-video" id="scanVideo" autoplay muted playsinline></video><p class="scan-hint" id="scanHint">Сканируйте QR на партии или введите отдельный код передачи.</p><form id="scanProductForm" class="form"><label class="field">Код передачи<input name="code" class="scan-input mono" required autocomplete="off" placeholder="XXXX-XXXX-XXXX-XXXX"></label><div class="form-actions"><button class="btn" data-action="close-modal" type="button">Отмена</button><button class="btn btn-primary" type="submit">Подтвердить выдачу</button></div></form>`);
   let controls;
   dialog.addEventListener('close',()=>controls?.stop(),{once:true});
   const form=dialog.querySelector('#scanProductForm');
-  const submit=code=>{const normalized=String(code||'').trim().toUpperCase();if(normalized!==order.order_code)return toast('Код не совпадает');void run(async()=>checked(await supabase.from('gl_sales').update({delivery_status:'out_for_delivery',pickup_code:normalized}).eq('id',order.id).eq('delivery_status','assigned').select().single()),'Продукт получен');};
-  form.addEventListener('submit',event=>{event.preventDefault();submit(form.elements.code.value);});
+  let scanning=false,lastCandidate='';
+  const submit=async code=>{if(scanning)return;const normalized=String(code||'').trim().toUpperCase().replaceAll('-','');if(!/^[0-9A-F]{16}$/.test(normalized))return toast('Введите 16 символов кода передачи');scanning=true;const ok=await run(async()=>checked(await supabase.from('gl_sales').update({delivery_status:'out_for_delivery',pickup_code:normalized}).eq('id',order.id).eq('delivery_status','assigned').select().single()),'Продукт получен');if(ok)controls?.stop();scanning=false;};
+  form.addEventListener('submit',event=>{event.preventDefault();void submit(form.elements.code.value);});
   try{
     if(!navigator.mediaDevices?.getUserMedia)throw Error('Нет камеры');
     const reader=new BrowserQRCodeReader();
-    controls=await reader.decodeFromVideoDevice(undefined,dialog.querySelector('#scanVideo'),result=>{if(!result)return;const code=result.getText().trim().toUpperCase();form.elements.code.value=code;if(code===order.order_code){controls?.stop();submit(code);}else dialog.querySelector('#scanHint').textContent=`Считан ${code}. Это другая заявка.`;});
+    controls=await reader.decodeFromVideoDevice(undefined,dialog.querySelector('#scanVideo'),result=>{if(!result)return;const code=result.getText().trim().toUpperCase().replaceAll('-','');if(code===lastCandidate)return;lastCandidate=code;form.elements.code.value=code;void submit(code);});
   }catch{dialog.querySelector('#scanHint').textContent='Камера недоступна. Введите код с этикетки.';}
 }
 function productHandoverDialog(order, pickup=false) {
@@ -766,8 +790,9 @@ async function action(event) {
     if (name==='cancel-container'&&item&&item.store_id===staff.store_id) return cancelContainer(item);
   }
   if (staff.role==='logistics') {
+    if (name==='qr'&&item&&item.status==='picked_up'&&item.picked_up_by===user.id) return void qrDialog(item);
     if (name==='start-trip') return void run(async()=>checked(await supabase.from('gl_trips').insert({}).select().single()),'Рейс начат');
-    if (name==='finish-trip') {const trip=myTrip();if(!trip)return;return void run(async()=>{checked(await supabase.from('gl_trips').update({status:'completed'}).eq('id',trip.id).eq('status','active').select().single());stopGpsOnLogout();},'Рейс завершён');}
+    if (name==='cancel-trip') {const trip=myTrip();if(!trip)return;return void run(async()=>{checked(await supabase.from('gl_trips').update({status:'cancelled'}).eq('id',trip.id).eq('status','active').select().single());stopGpsOnLogout();},'Пустой рейс отменён');}
     if (name==='start-gps') return void startGps();
     if (name==='stop-gps') return stopGps();
     if (name==='assign'&&item&&myTrip()) return void run(async()=>checked(await supabase.from('gl_containers').update({status:'assigned',trip_id:myTrip().id}).eq('id',item.id).eq('status','ready').select().single()),'Контейнер добавлен в рейс');
@@ -777,6 +802,7 @@ async function action(event) {
     if (name==='claim-delivery'&&order) return void run(async()=>checked(await supabase.from('gl_sales').update({delivery_status:'assigned'}).eq('id',order.id).eq('delivery_status','ready').select().single()),'Доставка взята');
     if (name==='release-delivery'&&order) return void run(async()=>checked(await supabase.from('gl_sales').update({delivery_status:'ready'}).eq('id',order.id).eq('delivery_status','assigned').select().single()),'Доставка возвращена в очередь');
     if (name==='scan-product'&&order) return void productScanDialog(order);
+    if (name==='product-qr'&&order&&order.delivery_driver_id===user.id&&order.delivery_status==='out_for_delivery') return void productQrDialog(order);
     if (name==='complete-delivery'&&order) return productHandoverDialog(order);
   }
   if (staff.role==='production') {
@@ -845,7 +871,7 @@ document.addEventListener('submit',event=>{
     const address=f.elements.delivery_address.value.trim();
     if(fulfillment==='delivery'&&address.length<5)return toast('Укажите адрес доставки');
     if(fulfillment==='delivery'&&(!f.elements.latitude.value||!f.elements.longitude.value))return toast('Отметьте точку доставки на карте');
-    void run(async()=>checked(await supabase.from('gl_sales').insert({batch_id:f.elements.batch_id.value,packs:Number(f.elements.packs.value),unit_price:Number(f.elements.unit_price.value),customer_name:f.elements.customer_name.value.trim(),fulfillment,delivery_address:fulfillment==='delivery'?address:null,latitude:fulfillment==='delivery'?Number(f.elements.latitude.value):null,longitude:fulfillment==='delivery'?Number(f.elements.longitude.value):null,channel:f.elements.channel.value}).select().single()),'Заявка на продукт создана');
+    void run(async()=>{checked(await supabase.from('gl_sales').insert({batch_id:f.elements.batch_id.value,packs:Number(f.elements.packs.value),unit_price:Number(f.elements.unit_price.value),customer_name:f.elements.customer_name.value.trim(),fulfillment,delivery_address:fulfillment==='delivery'?address:null,latitude:fulfillment==='delivery'?Number(f.elements.latitude.value):null,longitude:fulfillment==='delivery'?Number(f.elements.longitude.value):null,channel:f.elements.channel.value}).select().single());f.reset();f.elements.latitude.value='';f.elements.longitude.value='';saleDraft=null;},'Заявка на продукт создана');
   }
 });
 void boot().catch(error=>{console.error(error);authScreen('Не удалось открыть сайт',error.message,'<button class="btn" data-action="reload">Повторить</button>');});
