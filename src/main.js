@@ -93,9 +93,25 @@ function toast(message) {
   toastTimer = setTimeout(() => el.classList.remove('show'), 4300);
 }
 function brand() { return `<a class="brand" href="./index.html">GroundLoop<span class="brand-dot" aria-hidden="true">.</span></a>`; }
+function saleDraftKey() { return user?.id ? `gl_sale_draft_${user.id}` : null; }
+function readSaleDraft() {
+  const key=saleDraftKey();
+  if(!key)return null;
+  try { const draft=JSON.parse(localStorage.getItem(key)||'null'); return draft&&typeof draft==='object'&&!Array.isArray(draft)?draft:null; }
+  catch { return null; }
+}
+function saveSaleDraft(form) {
+  if(!form||!saleDraftKey())return;
+  saleDraft=Object.fromEntries(new FormData(form));
+  try { localStorage.setItem(saleDraftKey(),JSON.stringify(saleDraft)); } catch { /* Keep the draft in memory if browser storage is unavailable. */ }
+}
+function clearSaleDraft() {
+  saleDraft=null;
+  try { localStorage.removeItem(saleDraftKey()); } catch { /* Browser storage may be unavailable. */ }
+}
 function shell(title, subtitle, actions, body) {
   const previousSaleForm=document.querySelector('#saleForm');
-  if(previousSaleForm) saleDraft=Object.fromEntries(new FormData(previousSaleForm));
+  if(previousSaleForm) saveSaleDraft(previousSaleForm);
   if (activeMap?.remove) activeMap.remove();
   activeMap = null; activeBaseLayer = null;
   app.innerHTML = `<div class="shell"><header class="top"><div class="top-inner">${brand()}<div class="top-context"><span class="top-divider"></span><span>Шымкент</span></div><div class="top-right"><button class="theme-toggle" data-action="toggle-theme" aria-label="${theme==='dark'?'Включить светлую тему':'Включить тёмную тему'}" title="${theme==='dark'?'Светлая тема':'Тёмная тема'}">${theme==='dark'?'☀':'◐'}<span>${theme==='dark'?'Светлая':'Тёмная'}</span></button><div class="top-user"><strong>${esc(staff.full_name)}</strong><small>${esc(user.email)}</small></div><button data-action="logout">Выйти</button></div></div></header><main class="container"><section class="hero"><div><div class="eyebrow">${esc(pageNames[staff.role])}${staff.store_id ? ` / ${esc(storeName(staff.store_id))}` : ''}</div><h1>${esc(title)}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="hero-actions">${actions || ''}</div></section><div class="workspace">${body}</div></main></div>`;
@@ -103,8 +119,9 @@ function shell(title, subtitle, actions, body) {
   const nav=workspace.querySelector(':scope > .tabs');
   if(nav){const main=document.createElement('div');main.className='workspace-main';for(const child of [...workspace.children])if(child!==nav)main.append(child);workspace.append(main);}
   const nextSaleForm=document.querySelector('#saleForm');
-  if(nextSaleForm&&saleDraft){
-    for(const [name,value] of Object.entries(saleDraft)){
+  const draft=saleDraft||readSaleDraft();
+  if(nextSaleForm&&draft){
+    for(const [name,value] of Object.entries(draft)){
       const field=nextSaleForm.elements.namedItem(name);
       if(field&&('value' in field)&&(!(field instanceof HTMLSelectElement)||[...field.options].some(option=>option.value===value))) field.value=value;
     }
@@ -308,6 +325,7 @@ async function boot() {
   const session = checked(await supabase.auth.getSession())?.session;
   if (!session) return loginScreen();
   user = session.user;
+  saleDraft=readSaleDraft();
   const email = user.email?.toLowerCase();
   if (!email) return loginScreen();
   staff = checked(await supabase.from('gl_staff').select('*').eq('email', email).maybeSingle());
@@ -819,6 +837,7 @@ function deliveryPinDialog() {
       form.elements.latitude.value=point[0].toFixed(7);
       form.elements.longitude.value=point[1].toFixed(7);
       form.querySelector('[data-action=delivery-pin]').textContent='Точка доставки отмечена';
+      saveSaleDraft(form);
       closeModal();
     });
     setTimeout(()=>map.invalidateSize(),100);
@@ -905,9 +924,11 @@ function updateHistorySearch(form) {
 }
 document.addEventListener('input',event=>{
   if(event.target.closest('#historySearch'))updateHistorySearch(event.target.form);
+  if(event.target.closest('#saleForm'))saveSaleDraft(event.target.form);
   if(event.target.name==='packs'&&event.target.closest('#saleForm'))syncSaleAvailability();
 });
 document.addEventListener('change',event=>{
+  if(event.target.closest('#saleForm'))saveSaleDraft(event.target.form);
   if(event.target.name==='fulfillment')syncDeliveryField();
   if(event.target.name==='batch_id'&&event.target.closest('#saleForm'))syncSaleAvailability();
   if(event.target.closest('#historySearch'))updateHistorySearch(event.target.form);
@@ -956,7 +977,7 @@ document.addEventListener('submit',event=>{
     const address=f.elements.delivery_address.value.trim();
     if(fulfillment==='delivery'&&address.length<5)return toast('Укажите адрес доставки');
     if(fulfillment==='delivery'&&(!f.elements.latitude.value||!f.elements.longitude.value))return toast('Отметьте точку доставки на карте');
-    void run(async()=>{checked(await supabase.from('gl_sales').insert({batch_id:f.elements.batch_id.value,packs:Number(f.elements.packs.value),unit_price:Number(f.elements.unit_price.value),customer_name:f.elements.customer_name.value.trim(),fulfillment,delivery_address:fulfillment==='delivery'?address:null,latitude:fulfillment==='delivery'?Number(f.elements.latitude.value):null,longitude:fulfillment==='delivery'?Number(f.elements.longitude.value):null,channel:f.elements.channel.value}).select().single());f.reset();f.elements.latitude.value='';f.elements.longitude.value='';saleDraft=null;},'Заявка на продукт создана');
+    void run(async()=>{checked(await supabase.from('gl_sales').insert({batch_id:f.elements.batch_id.value,packs:Number(f.elements.packs.value),unit_price:Number(f.elements.unit_price.value),customer_name:f.elements.customer_name.value.trim(),fulfillment,delivery_address:fulfillment==='delivery'?address:null,latitude:fulfillment==='delivery'?Number(f.elements.latitude.value):null,longitude:fulfillment==='delivery'?Number(f.elements.longitude.value):null,channel:f.elements.channel.value}).select().single());f.reset();f.elements.latitude.value='';f.elements.longitude.value='';},'Заявка на продукт создана').then(ok=>{if(ok)clearSaleDraft();});
   }
 });
 void boot().catch(error=>{console.error(error);authScreen('Не удалось открыть сайт',error.message,'<button class="btn" data-action="reload">Повторить</button>');});
