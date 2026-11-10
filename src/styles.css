@@ -174,3 +174,7 @@ body[data-theme="dark"] .operations-map{background:#19231e}
 @media(max-width:640px){.theme-toggle span{display:none}.history-search{grid-template-columns:minmax(0,1fr) 130px}.history-search label:last-child{grid-column:1/-1}.arrival-banner{flex-wrap:wrap}.arrival-banner .btn{margin-left:21px}body[data-theme="dark"] .tabs{border-color:#334239}body[data-theme="dark"][data-role="barista"] .tabs,body[data-theme="dark"][data-role="logistics"] .tabs,body[data-theme="dark"][data-role="production"] .tabs{background:#17221e;border-color:#34473c}body[data-theme="dark"] .tab.active{background:#203c2b!important}}
 @media(max-width:640px){body[data-role="barista"] .tabs,body[data-role="logistics"] .tabs,body[data-role="production"] .tabs{top:auto;height:auto;align-items:stretch}}
 @media(max-width:980px){body[data-role="manager"] .tabs{scrollbar-width:none}body[data-role="manager"] .tabs::-webkit-scrollbar{display:none}}
+.stock-hint{margin-top:-8px;color:#64776b;font-size:13px;line-height:1.35}
+.stock-hint.stock-error{color:#a34134}
+body[data-theme="dark"] .stock-hint{color:#9eb8a6}
+body[data-theme="dark"] .stock-hint.stock-error{color:#efaa9d}

@@ -20,7 +20,7 @@ const statuses = {
 };
 let user = null;
 let staff = null;
-let records = { stores: [], staff: [], trips: [], containers: [], batches: [], sales: [], positions: [], events: [], notifications: [] };
+let records = { stores: [], staff: [], trips: [], containers: [], batches: [], sales: [], stock: [], positions: [], events: [], notifications: [] };
 let activeTab = 'overview';
 let selectedMapTrip = null;
 let selectedMapRequest = null;
@@ -110,6 +110,7 @@ function shell(title, subtitle, actions, body) {
     }
   }
   syncDeliveryField();
+  syncSaleAvailability();
   if (document.querySelector('#operationsMap')) requestAnimationFrame(() => void drawOperationsMap());
 }
 function syncDeliveryField() {
@@ -120,6 +121,56 @@ function syncDeliveryField() {
   field.hidden=!delivery;
   form.elements.delivery_address.required=delivery;
   form.querySelector('[data-action=delivery-pin]').hidden=!delivery;
+}
+function availablePacks(batch) {
+  if (!batch || batch.status !== 'complete') return 0;
+  const serverStock=records.stock.find(row=>row.batch_id===batch.id);
+  if(serverStock)return Number(serverStock.available_packs);
+  const reserved=records.sales.filter(s=>s.batch_id===batch.id&&s.delivery_status!=='cancelled').reduce((sum,s)=>sum+Number(s.packs),0);
+  return Math.max(0,Number(batch.produced_packs)-reserved);
+}
+function availableBatches() { return records.batches.filter(b=>availablePacks(b)>0); }
+function salesStatsMarkup() {
+  const produced=records.batches.reduce((sum,b)=>sum+Number(b.produced_packs),0);
+  const sold=records.sales.filter(s=>s.delivery_status==='delivered').reduce((sum,s)=>sum+Number(s.packs),0);
+  const reserved=records.sales.filter(s=>s.delivery_status!=='cancelled').reduce((sum,s)=>sum+Number(s.packs),0);
+  const revenue=records.sales.filter(s=>s.delivery_status==='delivered').reduce((sum,s)=>sum+Number(s.packs)*Number(s.unit_price),0);
+  return `${stat('Готово',`${produced} уп.`)}${stat('Зарезервировано',`${reserved-sold} уп.`)}${stat('Передано',`${sold} уп.`)}${stat('Выручка',money(revenue))}`;
+}
+function currentSalesMarkup() {
+  const current=records.sales.filter(s=>!['delivered','cancelled'].includes(s.delivery_status)).sort(byNewest);
+  return current.length?current.map(s=>productOrderItem(s,'manager')).join(''):empty('Активных заявок нет','Создайте заявку из готовой партии.');
+}
+function syncSaleAvailability() {
+  const form=document.querySelector('#saleForm');
+  if(!form)return;
+  const selected=records.batches.find(b=>b.id===form.elements.batch_id.value);
+  const remaining=availablePacks(selected);
+  const quantity=Number(form.elements.packs.value);
+  form.elements.packs.max=String(remaining);
+  const hint=form.querySelector('#saleStockHint');
+  if(hint){
+    hint.textContent=remaining?`Доступно: ${remaining} ${word(remaining,'упаковка','упаковки','упаковок')}${quantity>remaining?` · указано ${quantity}, уменьшите количество`:''}`:'В партии не осталось упаковок';
+    hint.classList.toggle('stock-error',!remaining||quantity>remaining);
+  }
+  form.querySelector('[type=submit]').disabled=!remaining;
+}
+function updateSalesWorkspace() {
+  const form=document.querySelector('#saleForm');
+  if(!form)return;
+  const stats=document.querySelector('#salesStats');
+  const orders=document.querySelector('#salesCurrent');
+  const statsMarkup=salesStatsMarkup(),ordersMarkup=currentSalesMarkup();
+  if(stats&&stats.innerHTML!==statsMarkup)stats.innerHTML=statsMarkup;
+  if(orders&&orders.innerHTML!==ordersMarkup)orders.innerHTML=ordersMarkup;
+  const select=form.elements.batch_id;
+  for(const batch of records.batches.filter(b=>b.status==='complete')){
+    const remaining=availablePacks(batch);
+    let option=[...select.options].find(x=>x.value===batch.id);
+    if(!option&&remaining){option=new Option('',batch.id);select.add(option);}
+    if(option){option.textContent=`${batch.code} · ${remaining} уп.`;option.disabled=!remaining&&option.value!==select.value;}
+  }
+  syncSaleAvailability();
 }
 function authScreen(title, description, content) {
   app.innerHTML = `<div class="auth-wrap"><div class="auth-card"><div class="auth-head">${brand()}<button class="theme-toggle" data-action="toggle-theme" aria-label="Сменить тему">${theme==='dark'?'☀':'◐'}</button></div><h1>${esc(title)}</h1><p>${esc(description)}</p>${content}</div></div>`;
@@ -163,7 +214,9 @@ async function run(task, success) {
     return true;
   } catch (error) {
     console.error(error);
-    toast(error.message || 'Операция не выполнена');
+    const message=error.message||'Операция не выполнена';
+    toast(/Order exceeds available stock/.test(message)?'Остаток партии изменился. Проверьте доступное количество.':message);
+    if(/Order exceeds available stock/.test(message))void refresh();
     return false;
   } finally { busy = false; }
 }
@@ -213,8 +266,12 @@ async function refresh() {
       ['notifications', 'gl_notifications', '*'],
     ];
     if (staff.role === 'manager') queries.push(['staff', 'gl_staff', '*']);
-    const results = await Promise.all(queries.map(async ([key, table, columns]) => [key, checked(await supabase.from(table).select(columns).limit(1000))]));
+    const [results,stockResult] = await Promise.all([
+      Promise.all(queries.map(async ([key, table, columns]) => [key, checked(await supabase.from(table).select(columns).limit(1000))])),
+      staff.role==='manager'?supabase.rpc('gl_batch_stock'):Promise.resolve({data:[]}),
+    ]);
     for (const [key, value] of results) records[key] = value;
+    records.stock=stockResult.error?[]:(stockResult.data||[]);
     if (staff.role === 'logistics') syncGps();
     if (staff.role==='barista' && records.containers.length) {
       const incoming=records.containers.filter(x=>x.store_id===staff.store_id&&x.status==='assigned');
@@ -225,7 +282,10 @@ async function refresh() {
       sessionStorage.setItem(seenKey,JSON.stringify(incoming.map(x=>x.id)));
     }
     if (staff.role==='manager' && activeTab==='sales' && !historyLoading) void loadSalesHistory(false);
-    if (!document.querySelector('#activeDialog') && !document.activeElement?.closest('#saleForm,#staffForm,#storeForm,#historySearch')) render();
+    if (!document.querySelector('#activeDialog')) {
+      if(staff.role==='manager'&&activeTab==='sales'&&document.querySelector('#saleForm')) updateSalesWorkspace();
+      else if(!document.activeElement?.closest('#staffForm,#storeForm,#historySearch')) render();
+    }
   } catch (error) { console.error(error); toast(`Не удалось обновить данные: ${error.message}`); }
   finally { refreshing = false; if (queuedRefresh) { queuedRefresh = false; void refresh(); } }
 }
@@ -683,9 +743,21 @@ function renderManagement() {
   } else if (activeTab==='stores') {
     body += `<div class="grid"><section class="card"><div class="card-head"><div><h2>Точки сбора</h2><p>Адреса вывоза и назначение бариста</p></div></div>${[...records.stores].sort((a,b)=>a.name.localeCompare(b.name,'ru')).map(s=>`<div class="item"><div class="item-top"><div><div class="item-title">${esc(s.name)}</div><div class="item-sub">${esc(s.address||'Адрес вывоза не указан')}${s.district?` · ${esc(s.district)}`:''}</div></div>${s.active?'<span class="badge">Активна</span>':'<span class="badge neutral">Отключена</span>'}</div><div class="item-actions">${button('Изменить','edit-store',`data-id="${esc(s.id)}"`,'btn-sm')}</div></div>`).join('')||empty('Точек пока нет','Добавьте первую точку.')}</section><aside class="stack"><section class="card"><div class="card-head"><h2>Добавить точку</h2></div><div class="card-body"><form id="storeForm" class="form"><label class="field">Название точки<input name="name" required maxlength="120" placeholder="Global Coffee — название"></label><label class="field">Адрес вывоза<input name="address" required maxlength="200" placeholder="Город, улица, дом"></label><label class="field">Район<input name="district" maxlength="160"></label><button class="btn btn-primary" type="submit">Добавить точку</button></form></div></section></aside></div>`;
   } else if (activeTab==='sales') {
-    const available=records.batches.filter(b=>b.status==='complete'&&b.produced_packs-records.sales.filter(s=>s.batch_id===b.id&&s.delivery_status!=='cancelled').reduce((sum,s)=>sum+s.packs,0)>0);
-    const current=records.sales.filter(x=>!['delivered','cancelled'].includes(x.delivery_status)).sort(byNewest);
-    body += `<section class="stats compact-stats">${stat('Готово',`${produced} уп.`)}${stat('Зарезервировано',`${reserved-sold} уп.`)}${stat('Передано',`${sold} уп.`)}${stat('Выручка',money(revenue))}</section><div class="grid"><section class="card"><div class="card-head"><h2>Заявки на продукт</h2></div>${current.length?current.map(x=>productOrderItem(x,'manager')).join(''):empty('Активных заявок нет','Создайте заявку из готовой партии.')}<div class="card-head"><h2>История передач</h2></div><form id="historySearch" class="history-search" autocomplete="off"><label>Поиск<input name="query" type="search" placeholder="Имя или код" value="${esc(historyQuery)}"></label><label>Дата<input name="date" type="date" value="${esc(historyDate)}"></label><label>Порядок<select name="sort"><option value="new" ${historyOldestFirst?'':'selected'}>Сначала новые</option><option value="old" ${historyOldestFirst?'selected':''}>Сначала старые</option></select></label></form><div id="historyResults">${historyResultsMarkup()}</div></section><aside class="card"><div class="card-head"><h2>Новая заявка</h2></div><div class="card-body"><form id="saleForm" class="form"><label class="field">Покупатель<input name="customer_name" required minlength="2" maxlength="120" placeholder="Компания или имя"></label><label class="field">Готовая партия<select name="batch_id" required>${available.map(b=>`<option value="${b.id}">${esc(b.code)} · ${b.produced_packs-records.sales.filter(s=>s.batch_id===b.id&&s.delivery_status!=='cancelled').reduce((sum,s)=>sum+s.packs,0)} уп.</option>`).join('')}</select></label><label class="field">Упаковок<input name="packs" type="number" min="1" step="1" inputmode="numeric" required></label><label class="field">Цена за упаковку, ₸<input name="unit_price" type="number" min="0" step="1" inputmode="numeric" required></label><label class="field">Передача<select name="fulfillment"><option value="pickup">Самовывоз</option><option value="delivery">Доставка логистом</option></select></label><label class="field">Адрес доставки<input name="delivery_address" maxlength="200" placeholder="Город, улица, дом"></label><input type="hidden" name="latitude"><input type="hidden" name="longitude"><button class="btn" type="button" data-action="delivery-pin">Указать точку доставки на карте</button><label class="field">Канал<select name="channel"><option>Кофейня</option><option>Партнёрская точка</option><option>Прямой заказ</option></select></label><button class="btn btn-primary" type="submit" ${available.length?'':'disabled'}>Создать заявку</button></form></div></aside></div>`;
+    const available=availableBatches();
+    body += `<section class="stats compact-stats" id="salesStats">${salesStatsMarkup()}</section>
+      <div class="grid"><section class="card"><div class="card-head"><h2>Заявки на продукт</h2></div>
+      <div id="salesCurrent">${currentSalesMarkup()}</div>
+      <div class="card-head"><h2>История передач</h2></div>
+      <form id="historySearch" class="history-search" autocomplete="off"><label>Поиск<input name="query" type="search" placeholder="Имя или код" value="${esc(historyQuery)}"></label><label>Дата<input name="date" type="date" value="${esc(historyDate)}"></label><label>Порядок<select name="sort"><option value="new" ${historyOldestFirst?'':'selected'}>Сначала новые</option><option value="old" ${historyOldestFirst?'selected':''}>Сначала старые</option></select></label></form><div id="historyResults">${historyResultsMarkup()}</div></section>
+      <aside class="card"><div class="card-head"><h2>Новая заявка</h2></div><div class="card-body"><form id="saleForm" class="form">
+      <label class="field">Покупатель<input name="customer_name" required minlength="2" maxlength="120" placeholder="Компания или имя"></label>
+      <label class="field">Готовая партия<select name="batch_id" required>${available.map(b=>`<option value="${b.id}">${esc(b.code)} · ${availablePacks(b)} уп.</option>`).join('')}</select></label>
+      <label class="field">Упаковок<input name="packs" type="number" min="1" step="1" inputmode="numeric" required></label><div class="stock-hint" id="saleStockHint" aria-live="polite"></div>
+      <label class="field">Цена за упаковку, ₸<input name="unit_price" type="number" min="0" step="1" inputmode="numeric" required></label>
+      <label class="field">Передача<select name="fulfillment"><option value="pickup">Самовывоз</option><option value="delivery">Доставка логистом</option></select></label>
+      <label class="field">Адрес доставки<input name="delivery_address" maxlength="200" placeholder="Город, улица, дом"></label><input type="hidden" name="latitude"><input type="hidden" name="longitude"><button class="btn" type="button" data-action="delivery-pin">Указать точку доставки на карте</button>
+      <label class="field">Канал<select name="channel"><option>Кофейня</option><option>Партнёрская точка</option><option>Прямой заказ</option></select></label>
+      <button class="btn btn-primary" type="submit" ${available.length?'':'disabled'}>Создать заявку</button></form></div></aside></div>`;
   }
   shell(({overview:'Операционный обзор',map:'Карта рейсов',sales:'Заказы продукта',journal:'Журнал операций',staff:'Команда',stores:'Точки сбора'})[activeTab], '', '', body);
 }
@@ -831,11 +903,21 @@ function updateHistorySearch(form) {
   clearTimeout(historyTimer);
   historyTimer=setTimeout(()=>void loadSalesHistory(false),280);
 }
-document.addEventListener('input',event=>{if(event.target.closest('#historySearch'))updateHistorySearch(event.target.form);});
+document.addEventListener('input',event=>{
+  if(event.target.closest('#historySearch'))updateHistorySearch(event.target.form);
+  if(event.target.name==='packs'&&event.target.closest('#saleForm'))syncSaleAvailability();
+});
 document.addEventListener('change',event=>{
   if(event.target.name==='fulfillment')syncDeliveryField();
+  if(event.target.name==='batch_id'&&event.target.closest('#saleForm'))syncSaleAvailability();
   if(event.target.closest('#historySearch'))updateHistorySearch(event.target.form);
 });
+document.addEventListener('invalid',event=>{
+  if(event.target.name==='packs'&&event.target.closest('#saleForm')){
+    const batch=records.batches.find(b=>b.id===event.target.form.elements.batch_id.value);
+    toast(`На выбранной партии доступно ${availablePacks(batch)} уп.`);
+  }
+},true);
 document.addEventListener('submit',event=>{
   if (event.target.id==='historySearch') { event.preventDefault(); updateHistorySearch(event.target); return; }
   if (event.target.id==='loginForm') {
@@ -867,6 +949,9 @@ document.addEventListener('submit',event=>{
   }
   if (event.target.id==='saleForm'&&staff?.role==='manager') {
     event.preventDefault();const f=event.target;
+    const batch=records.batches.find(b=>b.id===f.elements.batch_id.value);
+    const quantity=Number(f.elements.packs.value),remaining=availablePacks(batch);
+    if(!Number.isInteger(quantity)||quantity<1||quantity>remaining)return toast(`На выбранной партии доступно ${remaining} уп.`);
     const fulfillment=f.elements.fulfillment.value;
     const address=f.elements.delivery_address.value.trim();
     if(fulfillment==='delivery'&&address.length<5)return toast('Укажите адрес доставки');
