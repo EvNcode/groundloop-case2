@@ -184,7 +184,7 @@ export function normalizeImportedRows(rows, defaults = {}) {
 }
 
 export function buildPickupRoute(collections, stores) {
-  const ready = collections.filter((item) => item.status === "ready" && item.quality === "good");
+  const ready = collections.filter((item) => item.status === "ready" && item.quality === "good" && Number(item.wetKg) > 0);
   const storeById = new Map(stores.map((store) => [store.id, store]));
   const grouped = new Map();
   ready.forEach((item) => {

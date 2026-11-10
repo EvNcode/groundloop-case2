@@ -126,6 +126,15 @@ test("empty route shows zero distance and time", () => {
   assert.deepEqual(buildPickupRoute([], []), { stops: [], totalKg: 0, distanceKm: 0, estimatedMinutes: 0 });
 });
 
+test("zero weight containers cannot enter a pickup route", () => {
+  const route = buildPickupRoute([
+    { id: "zero", storeId: "A", status: "ready", quality: "good", wetKg: 0 },
+    { id: "valid", storeId: "B", status: "ready", quality: "good", wetKg: 2.4 },
+  ], [{ id: "A", district: "Центр" }, { id: "B", district: "Центр" }]);
+  assert.deepEqual(route.stops.flatMap((stop) => stop.collectionIds), ["valid"]);
+  assert.equal(route.totalKg, 2.4);
+});
+
 test("concurrent edits to separate collections are merged", () => {
   const base = { collections: [{ id: "A", status: "review" }, { id: "B", status: "ready" }], economicsParams: { pricePerPack: 1000 } };
   const local = { ...base, collections: [{ id: "A", status: "ready" }, base.collections[1]] };

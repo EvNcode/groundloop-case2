@@ -69,15 +69,15 @@ async function token() {
 }
 
 export async function readWorkspace(userId) {
-  const rows = await request(`/rest/v1/groundloop_demo_workspace?owner_id=eq.${encodeURIComponent(userId)}&select=state,revision&limit=1`, {}, await token());
+  const rows = await request("/rest/v1/groundloop_open_workspace?id=eq.pilot&select=state,revision&limit=1", {}, await token());
   return rows[0] || null;
 }
 
 export async function createWorkspace(state, userId) {
   try {
-    const rows = await request("/rest/v1/groundloop_demo_workspace?select=state,revision", {
+    const rows = await request("/rest/v1/groundloop_open_workspace?select=state,revision", {
       method: "POST", headers: { Prefer: "return=representation" },
-      body: JSON.stringify({ owner_id: userId, state }),
+      body: JSON.stringify({ id: "pilot", state }),
     }, await token());
     return rows[0];
   } catch (error) {
@@ -87,12 +87,12 @@ export async function createWorkspace(state, userId) {
 }
 
 export async function updateWorkspace(state, revision, userId) {
-  const rows = await request(`/rest/v1/groundloop_demo_workspace?owner_id=eq.${encodeURIComponent(userId)}&revision=eq.${revision}&select=revision`, {
+  const rows = await request(`/rest/v1/groundloop_open_workspace?id=eq.pilot&revision=eq.${revision}&select=revision`, {
     method: "PATCH", headers: { Prefer: "return=representation" },
     body: JSON.stringify({ state, revision: revision + 1 }),
   }, await token());
   if (!rows.length) {
-    const error = new Error("Демо изменилось в другой вкладке");
+    const error = new Error("Данные изменились на другом рабочем месте");
     error.code = "conflict";
     throw error;
   }

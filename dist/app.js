@@ -29,6 +29,21 @@ const viewMeta = {
   traceability: "Продукт и партия",
   data: "Данные",
 };
+const ROLE_VIEWS = {
+  manager: ["overview", "collections", "logistics", "production", "economics", "traceability", "data"],
+  barista: ["collections"],
+  logistics: ["logistics", "collections"],
+  production: ["production", "traceability"],
+};
+const ROLE_ACTIONS = {
+  barista: new Set(["open-collection"]),
+  logistics: new Set(["create-route", "pickup-stop"]),
+  production: new Set(["create-batch", "advance-batch", "select-batch"]),
+};
+let activeRole = ROLE_VIEWS[localStorage.getItem("groundloop_role")] ? localStorage.getItem("groundloop_role") : "manager";
+let activeStoreId = localStorage.getItem("groundloop_store") || "GC-01";
+function may(action) { return activeRole === "manager" || ROLE_ACTIONS[activeRole]?.has(action); }
+function canView(view) { return ROLE_VIEWS[activeRole]?.includes(view); }
 
 function seedState() {
   const stores = [
@@ -56,7 +71,7 @@ function seedState() {
     ["COL-101", "GC-01", TODAY, 238, 7.7, "ready", "good", "measured"],
     ["COL-102", "GC-02", TODAY, 211, 6.8, "ready", "good", "measured"],
     ["COL-103", "GC-03", TODAY, 326, 10.4, "review", "pending", "estimated"],
-    ["COL-104", "GC-04", dayAgo(1), 279, 8.9, "scheduled", "good", "measured"],
+    ["COL-104", "GC-04", dayAgo(1), 279, 8.9, "ready", "good", "measured"],
     ["COL-105", "GC-05", dayAgo(1), 187, 6.0, "collected", "good", "estimated"],
     ["COL-106", "GC-06", dayAgo(1), 301, 9.6, "collected", "good", "measured"],
     ["COL-107", "GC-01", dayAgo(2), 247, 7.9, "collected", "good", "measured"],
@@ -115,14 +130,14 @@ function seedState() {
         status: "drying",
         groundsPerPackG: 160,
         producedPacks: 0,
-        recipe: "R-01 / тестовая рецептура",
+        recipe: "R-01 / кофейный композит",
       },
     ],
     productionRuns: [
       { id: "PR-001", batchId: "GL-261104-A", date: dayAgo(1), producedPacks: 78, status: "complete" },
     ],
     sales: [
-      { id: "SL-001", batchId: "GL-261104-A", date: TODAY, packs: 24, unitPrice: 1800, channel: "Пилот в кофейне", source: "synthetic" },
+      { id: "SL-001", batchId: "GL-261104-A", date: TODAY, packs: 24, unitPrice: 1800, channel: "Кофейня", source: "synthetic" },
     ],
     selectedBatchId: "GL-261104-A",
     economicsParams: {
@@ -166,6 +181,7 @@ let saveQueue = Promise.resolve();
 let cloudSaveBlocked = false;
 let cloudBaseState = null;
 let lastQueuedState = null;
+let refreshInFlight = false;
 
 const contentArea = document.querySelector("#contentArea");
 const viewTitle = document.querySelector("#viewTitle");
@@ -176,6 +192,8 @@ const collectionDate = document.querySelector("#collectionDate");
 const saleDialog = document.querySelector("#saleDialog");
 const saleForm = document.querySelector("#saleForm");
 const saleBatch = document.querySelector("#saleBatch");
+const stageDialog = document.querySelector("#stageDialog");
+const stageForm = document.querySelector("#stageForm");
 const toast = document.querySelector("#toast");
 
 function saveState() {
@@ -285,18 +303,13 @@ function storageLabel(item) {
 }
 
 function syntheticNotice() {
-  const label = state.dataMode !== "synthetic" ? "Импорт + синтетические данные" : state.collections.some((item) => item.source === "manual") ? "Ручные записи + синтетические данные" : "Демо · синтетические данные";
-  return `
-    <div class="data-note">
-      <span class="data-note-dot"></span>
-      <strong>${label}</strong>
-    </div>`;
+  return "";
 }
 
 function renderKpis(metrics) {
   return `
     <div class="metrics-strip">
-      <article class="metric"><div class="kpi-label">Точки в пилоте</div><div class="kpi-value">${metrics.activeStores}</div><div class="kpi-footer">из ${state.stores.length} точек сети</div></article>
+      <article class="metric"><div class="kpi-label">Активные точки</div><div class="kpi-value">${metrics.activeStores}</div><div class="kpi-footer">из ${state.stores.length} точек сети</div></article>
       <article class="metric"><div class="kpi-label">Учтено за цикл</div><div class="kpi-value">${formatNumber(metrics.wetKg, 1)} <small>кг</small></div><div class="kpi-footer">${metrics.measuredPct}% взвешено</div></article>
       <article class="metric metric-attention"><div class="kpi-label">К вывозу</div><div class="kpi-value">${formatNumber(metrics.readyKg, 1)} <small>кг</small></div><div class="kpi-footer">${metrics.readyCount} готовых контейнера</div></article>
       <article class="metric"><div class="kpi-label">Модельная прибыль</div><div class="kpi-value">${formatMoney(metrics.economics.profit)}</div><div class="kpi-footer">${metrics.economics.marginPct}% · ${SCENARIOS[state.scenario].label.toLowerCase()} расчёт</div></article>
@@ -319,6 +332,11 @@ function dashboardMetrics() {
     economics,
   };
 }
+function readyForBatch(item) {
+  const route = state.routes.find((entry) => entry.collectionIds.includes(item.id));
+  return item.status === "collected" && route?.status === "completed"
+    && !item.batchId && !state.batches.some((batch) => batch.collectionIds.includes(item.id));
+}
 
 function renderOverview() {
   const metrics = dashboardMetrics();
@@ -328,7 +346,7 @@ function renderOverview() {
   const packs = calculatePackOutput(workflowDry.acceptedKg, state.economicsParams.groundsPerPackG, 100);
   const pendingQuality = state.collections.filter((x) => x.quality === "pending").length;
   const activeRoutes = state.routes.filter((x) => x.status === "planned").length;
-  const unbatched = state.collections.filter((x) => x.status === "collected" && !state.batches.some((b) => b.collectionIds.includes(x.id)));
+  const unbatched = state.collections.filter(readyForBatch);
   const activeStores = state.stores.filter((store) => store.active);
   return `
     <div class="view-stack">
@@ -379,30 +397,31 @@ function renderOverview() {
 }
 
 function renderCollections() {
-  const activeStores = state.stores.filter((store) => store.active);
+  const activeStores = state.stores.filter((store) => store.active && (activeRole !== "barista" || store.id === activeStoreId));
+  const visibleCollections = state.collections.filter((item) => activeRole !== "barista" || item.storeId === activeStoreId);
   return `
     <div class="view-stack">
       ${syntheticNotice()}
       <section class="kpi-grid">
-        <article class="kpi-card"><div class="kpi-label">Записей</div><div class="kpi-value">${state.collections.length}</div><div class="kpi-footer"><span>за демо-период</span></div></article>
-        <article class="kpi-card"><div class="kpi-label">Измерено</div><div class="kpi-value">${state.collections.filter((x) => x.weightSource === "measured").length}</div><div class="kpi-footer"><span>вес указан в записи</span></div></article>
-        <article class="kpi-card"><div class="kpi-label">Оценено</div><div class="kpi-value">${state.collections.filter((x) => x.weightSource === "estimated").length}</div><div class="kpi-footer"><span>расчёт по числу напитков</span></div></article>
-        <article class="kpi-card"><div class="kpi-label">Отклонено</div><div class="kpi-value">${state.collections.filter((x) => x.status === "rejected").length}</div><div class="kpi-footer"><span>не попадёт в партию</span></div></article>
+        <article class="kpi-card"><div class="kpi-label">Записей</div><div class="kpi-value">${visibleCollections.length}</div><div class="kpi-footer"><span>в журнале</span></div></article>
+        <article class="kpi-card"><div class="kpi-label">Измерено</div><div class="kpi-value">${visibleCollections.filter((x) => x.weightSource === "measured").length}</div><div class="kpi-footer"><span>вес указан в записи</span></div></article>
+        <article class="kpi-card"><div class="kpi-label">Оценено</div><div class="kpi-value">${visibleCollections.filter((x) => x.weightSource === "estimated").length}</div><div class="kpi-footer"><span>расчёт по числу напитков</span></div></article>
+        <article class="kpi-card"><div class="kpi-label">Отклонено</div><div class="kpi-value">${visibleCollections.filter((x) => x.status === "rejected").length}</div><div class="kpi-footer"><span>не попадёт в партию</span></div></article>
       </section>
-      <section class="panel panel-pad storage-note"><div><p class="eyebrow">Хранение на точке</p><h2>Код, время, качество</h2><p>После взвешивания жмых помещают в закрытый подписанный контейнер. Журнал показывает время хранения; 24 часа до вывоза — целевой срок пилота, который нужно проверить на практике.</p></div><strong>${state.collections.filter((item) => item.storedAt && !["collected", "rejected"].includes(item.status) && Date.now() - Date.parse(item.storedAt) >= 86400000).length} требуют внимания</strong></section>
+      <section class="panel panel-pad storage-note"><div><p class="eyebrow">Хранение на точке</p><h2>Код, время, качество</h2><p>После взвешивания поместите жмых в закрытый подписанный контейнер. Контейнеры старше 24 часов требуют проверки.</p></div><strong>Требуют внимания: ${visibleCollections.filter((item) => item.storedAt && !["collected", "rejected"].includes(item.status) && Date.now() - Date.parse(item.storedAt) >= 86400000).length}</strong></section>
       <section class="panel">
-        <div class="panel-header"><div><h2>Журнал сбора</h2></div><button class="button button-primary" data-action="open-collection">Добавить</button></div>
+        <div class="panel-header"><div><h2>Журнал сбора</h2></div><button class="button button-primary" data-action="open-collection">Добавить запись</button></div>
         <div class="table-wrap"><table><thead><tr><th>ID</th><th>Точка</th><th>Дата</th><th>Продажи</th><th>Жмых</th><th>Качество</th><th>Статус / действие</th></tr></thead><tbody>
-          ${[...state.collections].sort((a,b) => b.date.localeCompare(a.date)).map((item) => `<tr><td>${h(item.id)}</td><td><span class="table-title">${h(storeFor(item.storeId)?.name || item.storeName)}</span><span class="table-sub">${h(storeFor(item.storeId)?.district || "Импорт")}</span></td><td>${formatDate(item.date)}<span class="table-sub">${storageLabel(item)}</span></td><td>${formatNumber(item.cups)} напитков</td><td><strong>${formatNumber(item.wetKg,1)} кг</strong><span class="table-sub">${sourceLabel(item.weightSource)}</span></td><td><span class="badge badge-${h(item.quality)}">${qualityLabel(item.quality)}</span></td><td>${item.quality === "pending" ? `<div class="review-actions"><button class="button button-dark button-small" data-action="approve-collection" data-id="${h(item.id)}">Принять</button><button class="button button-ghost button-small" data-action="reject-collection" data-id="${h(item.id)}">Отклонить</button></div>` : `<span class="badge badge-${h(item.status)}">${statusLabel(item.status)}</span>`}</td></tr>`).join("")}
+          ${[...visibleCollections].sort((a,b) => b.date.localeCompare(a.date)).map((item) => `<tr><td>${h(item.id)}</td><td><span class="table-title">${h(storeFor(item.storeId)?.name || item.storeName)}</span><span class="table-sub">${h(storeFor(item.storeId)?.district || "Импорт")}</span></td><td>${formatDate(item.date)}<span class="table-sub">${storageLabel(item)}</span></td><td>${formatNumber(item.cups)} напитков</td><td><strong>${formatNumber(item.wetKg,1)} кг</strong><span class="table-sub">${sourceLabel(item.weightSource)}</span></td><td><span class="badge badge-${h(item.quality)}">${qualityLabel(item.quality)}</span></td><td>${item.quality === "pending" && may("approve-collection") ? `<div class="review-actions"><button class="button button-dark button-small" data-action="approve-collection" data-id="${h(item.id)}">Принять</button><button class="button button-ghost button-small" data-action="reject-collection" data-id="${h(item.id)}">Отклонить</button></div>` : `<span class="badge badge-${h(item.status)}">${statusLabel(item.status)}</span>`}</td></tr>`).join("")}
         </tbody></table></div>
       </section>
       <section class="panel">
-        <div class="panel-header"><div><h2>Точки пилота</h2></div><span class="badge badge-good">${activeStores.length} активных</span></div>
+        <div class="panel-header"><div><h2>${activeRole === "barista" ? "Моя точка" : "Точки сети"}</h2></div><span class="badge badge-good">${activeStores.length} активных</span></div>
         <div class="panel-pad triple-grid">
           ${activeStores.map((store) => {
             const entries = state.collections.filter((x) => x.storeId === store.id && x.status !== "rejected");
             const kg = entries.reduce((s,x) => s + x.wetKg,0);
-            return `<article class="batch-card"><div class="batch-head"><div><h3>${h(store.name.replace("Global Coffee — ",""))}</h3><span class="table-sub">${h(store.district)}</span></div><span class="badge badge-good">в пилоте</span></div><div class="batch-meta"><div><span>чашек/день</span><strong>${formatNumber(store.avgCups)}</strong></div><div><span>учтено</span><strong>${round(kg,1)} кг</strong></div><div><span>записей</span><strong>${entries.length}</strong></div></div></article>`;
+            return `<article class="batch-card"><div class="batch-head"><div><h3>${h(store.name.replace("Global Coffee — ",""))}</h3><span class="table-sub">${h(store.district)}</span></div><span class="badge badge-good">активна</span></div><div class="batch-meta"><div><span>чашек/день</span><strong>${formatNumber(store.avgCups)}</strong></div><div><span>учтено</span><strong>${round(kg,1)} кг</strong></div><div><span>записей</span><strong>${entries.length}</strong></div></div></article>`;
           }).join("")}
         </div>
       </section>
@@ -415,12 +434,12 @@ function renderLogistics() {
   return `
     <div class="view-stack">
       ${syntheticNotice()}
-      <section class="split-grid">
+      ${routePreview.stops.length ? `<section class="split-grid">
         <article class="route-card">
           <div class="route-top"><div><p class="eyebrow">Сборка маршрута</p><h3>Следующий маршрут</h3></div><span class="badge badge-${routePreview.stops.length ? "scheduled" : "complete"}">${routePreview.stops.length ? `${routePreview.stops.length} остановки` : "нет заявок"}</span></div>
           <div class="route-metrics"><div class="route-metric"><span>Сырьё</span><strong>${routePreview.totalKg} кг</strong></div><div class="route-metric"><span>Дистанция</span><strong>${routePreview.distanceKm} км</strong></div><div class="route-metric"><span>Время</span><strong>${routePreview.estimatedMinutes} мин</strong></div></div>
           <div class="route-path">${routePreview.stops.length ? routePreview.stops.map((item, index) => `<span class="route-stop">${index+1}. ${h((storeFor(item.storeId)?.name || item.storeName).replace("Global Coffee — ",""))}</span>`).join("<span class='flow-arrow'>→</span>") : "<span style='color:rgba(255,255,255,.55)'>Подтвердите качество записей, готовых к вывозу.</span>"}</div>
-          <div style="margin-top:20px"><button class="button button-primary" data-action="create-route" ${!routePreview.stops.length ? "disabled" : ""}>Создать маршрут</button></div>
+          <div class="batch-actions"><button class="button button-primary" data-action="create-route" ${!routePreview.stops.length || routePreview.totalKg <= 0 ? "disabled" : ""}>Сформировать маршрут</button></div>
         </article>
         <article class="panel panel-pad">
           <p class="eyebrow">Перед вывозом</p><h2 style="margin:8px 0 14px">Проверьте контейнеры</h2>
@@ -430,16 +449,18 @@ function renderLogistics() {
             <div class="assumption"><i></i><span>Вес к вывозу</span><strong>${formatNumber(routePreview.totalKg, 1)} кг</strong></div>
             <div class="assumption"><i></i><span>Остановки</span><strong>${routePreview.stops.length}</strong></div>
           </div>
-          <p style="color:var(--muted);font-size:11px;line-height:1.6;margin-bottom:0">Порядок остановок и время в пути — модельная оценка без дорожного API.</p>
+          <p class="table-sub">Расстояние и время — предварительная оценка.</p>
         </article>
-      </section>
+      </section>` : `<section class="panel panel-pad"><h2 style="margin:0 0 8px">Нет контейнеров к вывозу</h2><p style="margin:0;color:var(--text-secondary)">Все готовые контейнеры уже распределены по маршрутам. Текущие маршруты показаны ниже.</p></section>`}
       <section class="panel">
         <div class="panel-header"><div><h2>Маршруты</h2></div></div>
         <div class="table-wrap"><table><thead><tr><th>Маршрут</th><th>Дата</th><th>Остановки</th><th>Вес</th><th>Дистанция</th><th>Статус</th><th></th></tr></thead><tbody>
           ${routes.map((route) => {
             const items = state.collections.filter((x) => route.collectionIds.includes(x.id));
-            const kg = items.reduce((s,x) => s + x.wetKg,0);
-            return `<tr><td><span class="table-title">${h(route.id)}</span></td><td>${formatDate(route.date)}</td><td>${items.length}</td><td>${round(kg,1)} кг</td><td>${h(route.distanceKm)} км</td><td><span class="badge badge-${h(route.status)}">${statusLabel(route.status)}</span></td><td>${route.status === "planned" ? `<button class="button button-dark button-small" data-action="complete-route" data-id="${h(route.id)}">Завершить</button>` : ""}</td></tr>`;
+            const kg = items.reduce((s,x) => s + Number(x.wetKg || 0),0);
+            const stops = [...new Set(items.map((item) => item.storeId))];
+            const picked = items.filter((item) => item.status === "collected").length;
+            return `<tr><td><span class="table-title">${h(route.id)}</span></td><td>${formatDate(route.date)}</td><td>${stops.length}</td><td>${formatNumber(kg,1)} кг</td><td>${h(route.distanceKm)} км</td><td><span class="badge badge-${h(route.status)}">${statusLabel(route.status)}</span></td><td>${route.status === "planned" ? `${picked}/${items.length} забрано` : "Все забрано"}</td></tr>${route.status === "planned" ? `<tr><td colspan="7"><div class="pickup-list">${stops.map((storeId) => { const stopItems = items.filter((item) => item.storeId === storeId); const done = stopItems.every((item) => item.status === "collected"); return `<div class="pickup-row"><div><strong>${h(storeFor(storeId)?.name || storeId)}</strong><small>${stopItems.map((item) => h(item.containerCode || item.id)).join(", ")}</small></div><span>${formatNumber(stopItems.reduce((sum,item)=>sum+Number(item.wetKg||0),0),1)} кг</span>${done ? `<span class="badge badge-complete">Забрано</span>` : `<button class="button button-dark button-small" data-action="pickup-stop" data-id="${h(route.id)}" data-store-id="${h(storeId)}">Подтвердить вывоз</button>`}</div>`; }).join("")}</div></td></tr>` : ""}`;
           }).join("") || `<tr><td colspan="7"><div class="empty-state"><strong>Маршрутов пока нет</strong>Создайте первый маршрут из готовых контейнеров.</div></td></tr>`}
         </tbody></table></div>
       </section>
@@ -447,15 +468,15 @@ function renderLogistics() {
 }
 
 function renderProduction() {
-  const unbatched = state.collections.filter((x) => x.status === "collected" && !x.batchId && !state.batches.some((b) => b.collectionIds.includes(x.id)));
+  const unbatched = state.collections.filter(readyForBatch);
   return `
     <div class="view-stack">
       ${syntheticNotice()}
       <section class="kpi-grid">
         <article class="kpi-card"><div class="kpi-label">Собрано без партии</div><div class="kpi-value">${round(unbatched.reduce((s,x)=>s+x.wetKg,0),1)} кг</div><div class="kpi-footer"><span>${unbatched.length} записей</span></div></article>
         <article class="kpi-card"><div class="kpi-label">Партий</div><div class="kpi-value">${state.batches.length}</div><div class="kpi-footer"><span>полная прослеживаемость</span></div></article>
-        <article class="kpi-card"><div class="kpi-label">Готовой продукции</div><div class="kpi-value">${formatNumber(state.productionRuns.reduce((s,x)=>s+Number(x.producedPacks || 0),0))}</div><div class="kpi-footer"><span>упаковок в демо</span></div></article>
-        <article class="kpi-card"><div class="kpi-label">Продано / остаток</div><div class="kpi-value">${formatNumber(state.sales.reduce((sum, sale) => sum + sale.packs, 0))} / ${formatNumber(state.batches.reduce((sum, batch) => sum + batchStock(batch, state.sales).available, 0))}</div><div class="kpi-footer"><span>упаковок в демо</span></div></article>
+        <article class="kpi-card"><div class="kpi-label">Готовой продукции</div><div class="kpi-value">${formatNumber(state.productionRuns.reduce((s,x)=>s+Number(x.producedPacks || 0),0))}</div><div class="kpi-footer"><span>упаковок</span></div></article>
+        <article class="kpi-card"><div class="kpi-label">Продано / остаток</div><div class="kpi-value">${formatNumber(state.sales.reduce((sum, sale) => sum + sale.packs, 0))} / ${formatNumber(state.batches.reduce((sum, batch) => sum + batchStock(batch, state.sales).available, 0))}</div><div class="kpi-footer"><span>упаковок</span></div></article>
       </section>
       <section class="panel">
         <div class="panel-header"><div><h2>Партии</h2></div><button class="button button-primary" data-action="create-batch" ${!unbatched.length ? "disabled" : ""}>Новая партия</button></div>
@@ -463,12 +484,12 @@ function renderProduction() {
           ${state.batches.map((batch) => `<article class="batch-card ${batch.id === state.selectedBatchId ? "selected" : ""}">
             <div class="batch-head"><div><h3>${h(batch.id)}</h3><span class="table-sub">${formatDate(batch.createdAt)} · ${batch.sourceStores.length} точки</span></div><span class="badge badge-${h(batch.status)}">${statusLabel(batch.status)}</span></div>
             <div class="batch-meta"><div><span>мокрый вес</span><strong>${h(batch.wetKg)} кг</strong></div><div><span>чистый сухой</span><strong>${h(batch.acceptedKg)} кг</strong></div><div><span>упаковки</span><strong>${h(batch.producedPacks || "—")}</strong></div></div>
-            <div style="display:flex;gap:8px;margin-top:14px"><button class="button button-ghost button-small" data-action="select-batch" data-id="${h(batch.id)}">Открыть</button>${batch.status !== "complete" ? `<button class="button button-dark button-small" data-action="advance-batch" data-id="${h(batch.id)}">Следующий этап</button>` : ""}</div>
+            <div class="batch-actions"><button class="button button-ghost button-small" data-action="select-batch" data-id="${h(batch.id)}">Открыть</button>${batch.status !== "complete" ? `<button class="button button-dark button-small" data-action="advance-batch" data-id="${h(batch.id)}">${({received:"Начать сушку",drying:"Подтвердить сухой вес",production:"Зафиксировать выпуск"})[batch.status]}</button>` : ""}</div>
           </article>`).join("")}
         </div>
       </section>
       ${renderSelectedBatch()}
-      <section class="panel"><div class="panel-header"><div><h2>Продажи</h2><p class="table-sub">Синтетические записи для проверки пути от партии до выручки</p></div><button class="button button-primary" data-action="open-sale" ${state.batches.every((batch) => batchStock(batch, state.sales).available === 0) ? "disabled" : ""}>Зафиксировать продажу</button></div>
+      <section class="panel"><div class="panel-header"><div><h2>Продажи</h2></div><button class="button button-primary" data-action="open-sale" ${state.batches.every((batch) => batchStock(batch, state.sales).available === 0) ? "disabled" : ""}>Зафиксировать продажу</button></div>
         <div class="table-wrap"><table><thead><tr><th>Дата</th><th>Партия</th><th>Канал</th><th>Продано</th><th>Цена</th><th>Выручка</th></tr></thead><tbody>${[...state.sales].reverse().map((sale) => `<tr><td>${formatDate(sale.date)}</td><td>${h(sale.batchId)}</td><td>${h(sale.channel)}</td><td>${formatNumber(sale.packs)} уп.</td><td>${formatMoney(sale.unitPrice)}</td><td>${formatMoney(sale.packs * sale.unitPrice)}</td></tr>`).join("") || `<tr><td colspan="6"><div class="empty-state"><strong>Продаж пока нет</strong>Зафиксируйте выпуск и первую продажу.</div></td></tr>`}</tbody></table></div>
       </section>
     </div>`;
@@ -492,7 +513,7 @@ function renderSelectedBatch() {
         <label class="field">Остаток<input type="text" value="${stock.available} упаковок" disabled /></label>
         <label class="field field-wide">Источники<input type="text" value="${h(sources)}" disabled /></label>
       </div>
-      <div style="margin-top:16px;display:flex;gap:9px"><button class="button button-primary" data-action="create-run" data-id="${h(batch.id)}" ${batch.status !== "complete" || batch.producedPacks ? "disabled" : ""}>Зафиксировать выпуск</button><button class="button button-ghost" data-view-link="traceability">Продукт и паспорт</button></div>
+      <div class="batch-actions"><button class="button button-ghost" data-view-link="traceability">Продукт и паспорт</button></div>
     </article>
     <article class="panel">
       <div class="panel-header"><div><h2>Этапы</h2></div></div>
@@ -562,7 +583,7 @@ function renderTraceability() {
         <div class="passport-section"><h3>Происхождение</h3>${stores.map((s)=>`<div class="passport-fact"><span>${h(s.name.replace("Global Coffee — ",""))}</span><strong>${h(s.district)}</strong></div>`).join("") || `<div class="passport-fact"><span>Источник</span><strong>не указан</strong></div>`}</div>
         <div class="passport-section"><h3>Материальный баланс</h3><div class="passport-fact"><span>Мокрый жмых</span><strong>${h(batch.wetKg)} кг</strong></div><div class="passport-fact"><span>После сушки</span><strong>${h(batch.driedKg)} кг</strong></div><div class="passport-fact"><span>Принято</span><strong>${h(batch.acceptedKg)} кг</strong></div><div class="passport-fact"><span>Выпуск</span><strong>${batch.producedPacks ? `${h(batch.producedPacks)} уп.` : "ожидается"}</strong></div></div>
         <div class="passport-section"><h3>Контроль партии</h3><div class="passport-fact"><span>Дата создания</span><strong>${formatDate(batch.createdAt)}</strong></div><div class="passport-fact"><span>Рецептура</span><strong>R-01</strong></div><div class="passport-fact"><span>Статус</span><strong>${statusLabel(batch.status)}</strong></div></div>
-        <div class="passport-section"><h3>Выпуск и продажа</h3><div class="passport-fact"><span>Произведено</span><strong>${formatNumber(batch.producedPacks || 0)} уп.</strong></div><div class="passport-fact"><span>Продано в демо</span><strong>${formatNumber(batchStock(batch, state.sales).sold)} уп.</strong></div><div class="passport-fact"><span>Остаток</span><strong>${formatNumber(batchStock(batch, state.sales).available)} уп.</strong></div></div>
+        <div class="passport-section"><h3>Выпуск и продажа</h3><div class="passport-fact"><span>Произведено</span><strong>${formatNumber(batch.producedPacks || 0)} уп.</strong></div><div class="passport-fact"><span>Продано</span><strong>${formatNumber(batchStock(batch, state.sales).sold)} уп.</strong></div><div class="passport-fact"><span>Остаток</span><strong>${formatNumber(batchStock(batch, state.sales).available)} уп.</strong></div></div>
       </div>
     </section>
   </div>`;
@@ -579,11 +600,10 @@ function renderData() {
       </article>
       <article class="panel panel-pad">
         <p class="eyebrow">Управление данными</p><h2 style="margin:7px 0 16px">Переносимые данные</h2>
-        <div class="data-actions"><button class="button button-dark" data-action="download-template">Скачать шаблон CSV</button><button class="button button-ghost" data-action="export-json">Экспорт JSON</button><button class="button button-ghost" data-action="reset-demo">Сбросить моё демо</button></div>
-        <div class="assumption-list" style="margin-top:22px"><div class="assumption"><i></i><span>Текущий источник</span><strong>${state.dataMode === "synthetic" ? "Синтетика" : "Импорт + демо"}</strong></div><div class="assumption"><i></i><span>Хранилище</span><strong>${cloudEnabled ? "Supabase" : "Браузер"}</strong></div><div class="assumption"><i></i><span>Импортированных записей</span><strong>${state.collections.filter((x)=>x.source==="import").length}</strong></div></div>
+        <div class="data-actions"><button class="button button-dark" data-action="download-template">Скачать шаблон CSV</button><button class="button button-ghost" data-action="export-json">Экспорт JSON</button></div>
+        <div class="assumption-list" style="margin-top:22px"><div class="assumption"><i></i><span>Хранилище</span><strong>${cloudEnabled ? "Supabase" : "Браузер"}</strong></div><div class="assumption"><i></i><span>Импортированных записей</span><strong>${state.collections.filter((x)=>x.source==="import").length}</strong></div></div>
       </article>
     </section>
-    <section class="panel panel-pad"><h2>Как устроено демо</h2><p>Данные сохраняются в Supabase отдельно для этого браузера. Другие посетители не видят ваши правки. Если очистить данные браузера, доступ к текущему демо пропадёт. Рабочая база сотрудников закрыта.</p></section>
     <section class="panel">
       <div class="panel-header"><div><h2>Формат файла</h2></div></div>
       <div class="table-wrap"><table><thead><tr><th>Точка</th><th>Дата</th><th>Напитки</th><th>Жмых кг</th><th>Что произойдёт</th></tr></thead><tbody><tr><td>Global Coffee — Абая</td><td>2026-11-06</td><td>238</td><td>7.7</td><td>Вес отмечается как измеренный</td></tr><tr><td>Global Coffee — Mega</td><td>2026-11-06</td><td>326</td><td>пусто</td><td>Вес оценивается по сценарию</td></tr></tbody></table></div>
@@ -592,18 +612,28 @@ function renderData() {
 }
 
 function render() {
+  if (!canView(state.currentView)) state.currentView = ROLE_VIEWS[activeRole][0];
   viewTitle.textContent = viewMeta[state.currentView] || viewMeta.overview;
-  document.querySelector(".mode-line strong").textContent = "Личное демо";
-  document.querySelector(".mode-line small").textContent = state.dataMode !== "synthetic" ? "Импорт + демо" : state.collections.some((item) => item.source === "manual") ? "Ручной ввод + демо" : "Синтетические данные";
-  document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === state.currentView));
+  document.querySelector("#roleSelect").value = activeRole;
+  const storeSelect = document.querySelector("#storeSelect");
+  storeSelect.hidden = activeRole !== "barista";
+  storeSelect.innerHTML = state.stores.filter((store) => store.active).map((store) => `<option value="${h(store.id)}">${h(store.name.replace("Global Coffee — ", ""))}</option>`).join("");
+  if (!state.stores.some((store) => store.id === activeStoreId && store.active)) activeStoreId = state.stores.find((store) => store.active)?.id || "";
+  storeSelect.value = activeStoreId;
+  document.querySelectorAll(".nav-item").forEach((item) => {
+    item.hidden = !canView(item.dataset.view);
+    item.classList.toggle("active", item.dataset.view === state.currentView);
+  });
   const renderers = { overview: renderOverview, collections: renderCollections, logistics: renderLogistics, production: renderProduction, economics: renderEconomics, traceability: renderTraceability, data: renderData };
   contentArea.innerHTML = (renderers[state.currentView] || renderOverview)();
+  contentArea.querySelectorAll("button[data-action]").forEach((control) => { if (!may(control.dataset.action)) control.hidden = true; });
   if (cloudSaveBlocked) contentArea.querySelectorAll("button[data-action], input, textarea").forEach((control) => { control.disabled = true; });
-  document.querySelectorAll("[data-action='open-collection']").forEach((control) => { control.disabled = cloudSaveBlocked; });
+  document.querySelectorAll(".topbar [data-action='open-collection']").forEach((control) => { control.hidden = activeRole !== "barista" || state.currentView === "collections"; control.disabled = cloudSaveBlocked; });
   bindViewSpecificEvents();
 }
 
 function setView(view) {
+  if (!canView(view)) return;
   state.currentView = view;
   if (!cloudEnabled) saveState();
   render();
@@ -612,12 +642,14 @@ function setView(view) {
 }
 
 function openCollectionDialog() {
-  collectionStore.innerHTML = state.stores.filter((x) => x.active).map((store) => `<option value="${h(store.id)}">${h(store.name)}</option>`).join("");
+  if (!may("open-collection")) return;
+  collectionStore.innerHTML = state.stores.filter((x) => x.active && (activeRole !== "barista" || x.id === activeStoreId)).map((store) => `<option value="${h(store.id)}">${h(store.name)}</option>`).join("");
   collectionDate.value = TODAY;
   collectionDialog.showModal();
 }
 
 function openSaleDialog() {
+  if (!may("open-sale")) return;
   const available = state.batches.filter((batch) => batchStock(batch, state.sales).available > 0);
   if (!available.length) return showToast("Нет готовой продукции для продажи.");
   saleBatch.innerHTML = available.map((batch) => `<option value="${h(batch.id)}">${h(batch.id)} · ${batchStock(batch, state.sales).available} уп.</option>`).join("");
@@ -642,13 +674,15 @@ function applyScenario(key) {
 }
 
 function createRoute() {
+  if (!may("create-route")) return;
   const preview = buildPickupRoute(state.collections, state.stores);
-  if (!preview.stops.length) return showToast("Нет готовых контейнеров для маршрута.");
+  if (!preview.stops.length || preview.totalKg <= 0) return showToast("Нет контейнеров с положительным весом для маршрута.");
   const route = {
     id: `RT-${TODAY.replaceAll("-","")}-${crypto.randomUUID().slice(0, 6).toUpperCase()}`,
     date: TODAY,
     status: "planned",
     collectionIds: preview.stops.flatMap((x)=>x.collectionIds || [x.id]),
+    totalKg: preview.totalKg,
     distanceKm: preview.distanceKm,
     estimatedMinutes: preview.estimatedMinutes,
   };
@@ -657,16 +691,22 @@ function createRoute() {
   saveState(); render(); showToast(`Маршрут ${route.id} создан.`);
 }
 
-function completeRoute(id) {
+function pickupStop(id, storeId) {
+  if (!may("pickup-stop")) return;
   const route = state.routes.find((x) => x.id === id);
-  if (!route) return;
-  route.status = "completed";
-  state.collections = state.collections.map((item) => route.collectionIds.includes(item.id) ? { ...item, status: "collected" } : item);
-  saveState(); render(); showToast(`Маршрут ${id} завершён, сырьё принято.`);
+  if (!route || route.status !== "planned") return;
+  const stopItems = state.collections.filter((item) => route.collectionIds.includes(item.id) && item.storeId === storeId && item.status === "scheduled");
+  if (!stopItems.length) return showToast("На этой точке нет ожидающих контейнеров.");
+  const ids = new Set(stopItems.map((item) => item.id));
+  state.collections = state.collections.map((item) => ids.has(item.id) ? { ...item, status: "collected", pickedAt: new Date().toISOString() } : item);
+  route.pickups = [...(route.pickups || []), { storeId, at: new Date().toISOString(), kg: round(stopItems.reduce((sum, item) => sum + item.wetKg, 0), 2) }];
+  if (route.collectionIds.every((collectionId) => state.collections.find((item) => item.id === collectionId)?.status === "collected")) route.status = "completed";
+  saveState(); render(); showToast(route.status === "completed" ? `Маршрут ${id} завершён.` : "Вывоз с точки подтверждён.");
 }
 
 function createBatch() {
-  const items = state.collections.filter((x) => x.status === "collected" && !x.batchId && !state.batches.some((b)=>b.collectionIds.includes(x.id)));
+  if (!may("create-batch")) return;
+  const items = state.collections.filter(readyForBatch);
   if (!items.length) return showToast("Нет собранных записей без партии.");
   const wetKg = round(items.reduce((s,x)=>s+x.wetKg,0),2);
   const process = state.economicsParams;
@@ -675,7 +715,7 @@ function createBatch() {
   const batch = {
     id, createdAt: TODAY, collectionIds: items.map((x)=>x.id), sourceStores: [...new Set(items.map((x)=>x.storeId))], wetKg,
     dryYieldPct: process.dryYieldPct, rejectPct: process.rejectPct, driedKg: dry.driedKg, acceptedKg: dry.acceptedKg,
-    status: "received", groundsPerPackG: process.groundsPerPackG, producedPacks: 0, recipe: "R-01 / тестовая рецептура",
+    status: "received", groundsPerPackG: process.groundsPerPackG, producedPacks: 0, recipe: "R-01 / кофейный композит",
   };
   state.batches.unshift(batch);
   state.collections = state.collections.map((x)=>items.some((i)=>i.id===x.id)?{...x,batchId:id}:x);
@@ -684,20 +724,29 @@ function createBatch() {
 }
 
 function advanceBatch(id) {
+  if (!may("advance-batch")) return;
   const batch = state.batches.find((x)=>x.id===id);
   if (!batch) return;
-  const flow = ["received","drying","production","complete"];
-  batch.status = flow[Math.min(flow.length-1, flow.indexOf(batch.status)+1)];
-  saveState(); render(); showToast(`${id}: ${statusLabel(batch.status)}.`);
-}
-
-function createRun(id) {
-  const batch = state.batches.find((x)=>x.id===id);
-  if (!batch || batch.status !== "complete" || batch.producedPacks) return;
-  const output = calculatePackOutput(batch.acceptedKg, batch.groundsPerPackG, 100);
-  batch.producedPacks = output.producedPacks;
-  state.productionRuns.push({ id:`PR-${crypto.randomUUID().slice(0, 8).toUpperCase()}`, batchId:id, date:TODAY, producedPacks:output.producedPacks, status:"complete" });
-  saveState(); render(); showToast(`Выпуск ${output.producedPacks} упаковок зафиксирован.`);
+  if (batch.status === "received") {
+    batch.status = "drying";
+    batch.dryingStartedAt = new Date().toISOString();
+    saveState(); render(); showToast(`${id}: сушка начата.`);
+    return;
+  }
+  if (!["drying", "production"].includes(batch.status)) return;
+  stageForm.elements.namedItem("batchId").value = id;
+  stageForm.elements.namedItem("phase").value = batch.status;
+  if (batch.status === "drying") {
+    document.querySelector("#stageTitle").textContent = "Сухой вес и контроль";
+    document.querySelector("#stageInputs").innerHTML = `<label class="field">После сушки, кг<input name="driedKg" type="number" min="0.01" max="${h(batch.wetKg)}" step="0.01" value="${h(batch.driedKg)}" required /></label><label class="field">Принято после контроля, кг<input name="acceptedKg" type="number" min="0.01" step="0.01" value="${h(batch.acceptedKg)}" required /></label>`;
+    document.querySelector("#stageSubmit").textContent = "Подтвердить вес";
+  } else {
+    const maximum = calculatePackOutput(batch.acceptedKg, batch.groundsPerPackG, 100).producedPacks;
+    document.querySelector("#stageTitle").textContent = "Выпуск продукции";
+    document.querySelector("#stageInputs").innerHTML = `<label class="field field-wide">Произведено упаковок<input name="producedPacks" type="number" min="1" max="${maximum}" step="1" value="${maximum}" required /></label>`;
+    document.querySelector("#stageSubmit").textContent = "Зафиксировать выпуск";
+  }
+  stageDialog.showModal();
 }
 
 function download(name, content, type="text/plain;charset=utf-8") {
@@ -710,6 +759,7 @@ function download(name, content, type="text/plain;charset=utf-8") {
 
 async function importFile(file) {
   try {
+    if (!may("choose-file")) return;
     if (cloudSaveBlocked) return;
     if (!/\.(csv|xlsx|xls)$/i.test(file.name)) throw new Error("Поддерживаются только CSV и Excel.");
     if (file.size > 5 * 1024 * 1024) throw new Error("Файл больше 5 МБ. Разделите отчёт на части.");
@@ -741,7 +791,7 @@ async function importFile(file) {
     });
     next.dataMode = "mixed";
     next.lastImport = { fileName:file.name, rows:fresh.length, at:new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short",timeZone:"Asia/Qyzylorda"}).format(new Date()) };
-    if (new TextEncoder().encode(JSON.stringify(next)).length > 2097152) throw new Error("Объём пилота превысит 2 МБ. Разделите данные или перенесите архив в отдельный проект.");
+    if (new TextEncoder().encode(JSON.stringify(next)).length > 2097152) throw new Error("Объём данных превысит 2 МБ. Разделите файл.");
     state = next;
     render();
     await saveState();
@@ -771,6 +821,7 @@ function bindViewSpecificEvents() {
 }
 
 function reviewCollection(id, approved) {
+  if (!may("approve-collection")) return;
   const item = state.collections.find((entry) => entry.id === id);
   if (!item || item.quality !== "pending" || !["ready", "review"].includes(item.status)) return;
   item.quality = approved ? "good" : "rejected";
@@ -781,39 +832,48 @@ function reviewCollection(id, approved) {
 document.querySelectorAll(".nav-item").forEach((item)=>item.addEventListener("click",()=>setView(item.dataset.view)));
 document.querySelector("#menuButton").addEventListener("click",()=>document.querySelector("#sidebar").classList.toggle("open"));
 document.querySelectorAll("[data-action='open-collection']").forEach((button)=>button.addEventListener("click",openCollectionDialog));
+document.querySelector("#roleSelect").addEventListener("change", (event) => {
+  if (!ROLE_VIEWS[event.target.value]) return;
+  activeRole = event.target.value;
+  localStorage.setItem("groundloop_role", activeRole);
+  state.currentView = ROLE_VIEWS[activeRole][0];
+  render();
+});
+document.querySelector("#storeSelect").addEventListener("change", (event) => {
+  activeStoreId = event.target.value;
+  localStorage.setItem("groundloop_store", activeStoreId);
+  render();
+});
 
 contentArea.addEventListener("click", (event) => {
   const button = event.target.closest("button");
   if (!button) return;
   if (button.dataset.viewLink) return setView(button.dataset.viewLink);
   const { action, id } = button.dataset;
+  if (action && !may(action)) return;
   if (action === "open-collection") openCollectionDialog();
   if (action === "create-route") createRoute();
   if (action === "approve-collection") reviewCollection(id, true);
   if (action === "reject-collection") reviewCollection(id, false);
   if (action === "open-sale") openSaleDialog();
-  if (action === "complete-route") completeRoute(id);
+  if (action === "pickup-stop") pickupStop(id, button.dataset.storeId);
   if (action === "create-batch") createBatch();
   if (action === "advance-batch") advanceBatch(id);
   if (action === "select-batch") { state.selectedBatchId=id; saveState(); render(); }
-  if (action === "create-run") createRun(id);
   if (action === "set-scenario") applyScenario(id);
   if (action === "choose-file") document.querySelector("#fileInput")?.click();
   if (action === "download-template") download("groundloop-template.csv", "Точка,Дата,Напитки,Жмых кг\nGlobal Coffee — Абая,2026-11-06,238,7.7\nGlobal Coffee — Mega,2026-11-06,326,\n", "text/csv;charset=utf-8");
   if (action === "export-json") download("groundloop-export.json", JSON.stringify(state,null,2), "application/json");
-  if (action === "reset-demo") {
-    if (window.confirm("Сбросить все изменения и вернуть исходные синтетические данные?")) { state=seedState(); saveState(); render(); showToast("Демо-данные восстановлены."); }
-  }
 });
 
 collectionForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (cloudSaveBlocked) return;
+  if (cloudSaveBlocked || !may("open-collection")) return;
   const data = new FormData(collectionForm);
   const storeId = data.get("storeId");
   const cups = Number(data.get("cups"));
   const enteredWeight = Number(data.get("wetKg"));
-  if ((!cups && !enteredWeight) || cups < 0 || enteredWeight < 0 || !state.stores.some((store) => store.active && store.id === storeId)) return showToast("Укажите точку и количество напитков или вес больше нуля.");
+  if ((!cups && !enteredWeight) || cups < 0 || enteredWeight < 0 || !state.stores.some((store) => store.active && store.id === storeId) || (activeRole === "barista" && storeId !== activeStoreId)) return showToast("Укажите свою точку и количество напитков или вес больше нуля.");
   const estimated = !enteredWeight;
   const wetKg = enteredWeight || estimateWetGroundsKg(cups, state.economicsParams.wetGramsPerCup);
   const quality = data.get("quality");
@@ -829,16 +889,47 @@ collectionForm.addEventListener("submit", (event) => {
 
 saleForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (cloudSaveBlocked) return;
+  if (cloudSaveBlocked || !may("open-sale")) return;
   const data = new FormData(saleForm);
   const batch = state.batches.find((item) => item.id === data.get("batchId"));
   const packs = Number(data.get("packs"));
   const unitPrice = Number(data.get("unitPrice"));
   try {
     validateSaleDraft(batch, state.sales, packs, unitPrice);
-    state.sales.push({ id: `SL-${crypto.randomUUID().slice(0, 8).toUpperCase()}`, batchId: batch.id, date: TODAY, packs, unitPrice, channel: String(data.get("channel")), source: "synthetic" });
-    saveState(); saleDialog.close(); saleForm.reset(); render(); showToast(`${packs} упаковок записаны как продажа в демо.`);
+    state.sales.push({ id: `SL-${crypto.randomUUID().slice(0, 8).toUpperCase()}`, batchId: batch.id, date: TODAY, packs, unitPrice, channel: String(data.get("channel")), source: "manual" });
+    saveState(); saleDialog.close(); saleForm.reset(); render(); showToast(`Продано ${packs} упаковок.`);
   } catch (error) { showToast(error.message); }
+});
+
+stageForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (cloudSaveBlocked || !may("advance-batch")) return;
+  const data = new FormData(stageForm);
+  const batch = state.batches.find((item) => item.id === data.get("batchId"));
+  if (!batch || batch.status !== data.get("phase")) return showToast("Этап партии изменился. Обновите данные.");
+  if (batch.status === "drying") {
+    const driedKg = Number(data.get("driedKg"));
+    const acceptedKg = Number(data.get("acceptedKg"));
+    if (!Number.isFinite(driedKg) || !Number.isFinite(acceptedKg) || acceptedKg <= 0 || acceptedKg > driedKg || driedKg > batch.wetKg || driedKg <= 0) return showToast("Проверьте вес: принятый ≤ сухого ≤ мокрого.");
+    batch.driedKg = round(driedKg, 2);
+    batch.acceptedKg = round(acceptedKg, 2);
+    batch.dryYieldPct = round(driedKg / batch.wetKg * 100, 2);
+    batch.rejectPct = round((driedKg - acceptedKg) / driedKg * 100, 2);
+    batch.status = "production";
+    batch.weightConfirmedAt = new Date().toISOString();
+    showToast("Сухой вес подтверждён. Партия готова к формованию.");
+  } else if (batch.status === "production") {
+    const packs = Number(data.get("producedPacks"));
+    const maximum = calculatePackOutput(batch.acceptedKg, batch.groundsPerPackG, 100).producedPacks;
+    if (!Number.isInteger(packs) || packs < 1 || packs > maximum) return showToast(`Укажите от 1 до ${maximum} упаковок.`);
+    batch.producedPacks = packs;
+    batch.status = "complete";
+    state.productionRuns.push({ id: `PR-${crypto.randomUUID().slice(0, 8).toUpperCase()}`, batchId: batch.id, date: TODAY, producedPacks: packs, status: "complete" });
+    showToast(`Выпуск ${packs} упаковок зафиксирован.`);
+  }
+  saveState();
+  stageDialog.close();
+  render();
 });
 
 async function startCloud() {
@@ -853,7 +944,7 @@ async function startCloud() {
   cloudUser = await openDemoSession();
   let remote = await readWorkspace(cloudUser.id);
   if (!remote) remote = await createWorkspace(seedState(), cloudUser.id);
-  if (!remote) throw new Error("Демо-данные недоступны");
+  if (!remote) throw new Error("Рабочие данные недоступны");
   state = hydrateState({ ...remote.state, currentView: "overview" });
   cloudRevision = remote.revision;
   cloudBaseState = structuredClone(remote.state);
@@ -865,7 +956,32 @@ async function startCloud() {
   document.querySelector("#reloadWorkspace").hidden = false;
   document.querySelector("#reloadWorkspace").textContent = "Обновить данные";
   render();
+  setInterval(refreshWorkspace, 3500);
 }
+
+async function refreshWorkspace() {
+  if (refreshInFlight || document.hidden || !cloudUser || cloudSaveBlocked || !sameValue(lastQueuedState, cloudBaseState)) return;
+  refreshInFlight = true;
+  try {
+    const remote = await readWorkspace(cloudUser.id);
+    if (remote && remote.revision > cloudRevision && sameValue(lastQueuedState, cloudBaseState)) {
+      const currentView = state.currentView;
+      const selectedBatchId = state.selectedBatchId;
+      state = hydrateState({ ...remote.state, currentView, selectedBatchId });
+      cloudRevision = remote.revision;
+      cloudBaseState = structuredClone(remote.state);
+      cloudBaseState.currentView = "overview";
+      lastQueuedState = structuredClone(cloudBaseState);
+      document.querySelector("#syncStatus").textContent = "Обновлено";
+      render();
+    }
+  } catch {
+    document.querySelector("#syncStatus").textContent = "Связь прервана";
+  } finally {
+    refreshInFlight = false;
+  }
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshWorkspace(); });
 
 document.querySelector("#reloadWorkspace").addEventListener("click", () => location.reload());
 startCloud().catch((error) => {

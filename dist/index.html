@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f3f6f4" />
-    <meta name="description" content="GroundLoop — демо полного пути кофейного жмыха: сбор, хранение, вывоз, производство и продажа." />
+    <meta name="description" content="GroundLoop — сбор, вывоз, производство и учёт изделий из кофейного жмыха." />
     <title>GroundLoop — от жмыха к продукту</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -29,7 +29,16 @@
           </div>
         </div>
 
-        <div class="mode-line"><span></span><div><strong>Личное демо</strong><small>Синтетические данные</small></div></div>
+        <div class="workplace">
+          <label for="roleSelect">Рабочее место</label>
+          <select id="roleSelect" aria-label="Рабочее место">
+            <option value="manager">Управление</option>
+            <option value="barista">Бариста</option>
+            <option value="logistics">Логистика</option>
+            <option value="production">Производство</option>
+          </select>
+          <select id="storeSelect" aria-label="Моя точка" hidden></select>
+        </div>
 
         <nav class="main-nav" aria-label="Основная навигация">
           <button class="nav-item active" data-view="overview"><b>01</b><span>Обзор</span></button>
@@ -41,21 +50,18 @@
           <button class="nav-item" data-view="data"><b>07</b><span>Данные</span></button>
         </nav>
 
-        <div class="sidebar-footer">
-          <a class="unslop-credit" href="https://github.com/heydamir/unslop" target="_blank" rel="noreferrer">Interface pass: Unslop by Damir Sokolovsky</a>
-        </div>
       </aside>
 
       <main class="main-content">
         <header class="topbar">
           <button class="menu-button" id="menuButton" aria-label="Открыть меню">☰</button>
           <div>
-            <h1 id="viewTitle">Обзор пилота</h1>
+            <h1 id="viewTitle">Смена и задачи</h1>
           </div>
           <div class="topbar-actions">
             <span class="sync-status" id="syncStatus">Подключение…</span>
             <button class="text-button" id="reloadWorkspace" type="button" hidden>Повторить</button>
-            <button class="button button-primary" data-action="open-collection">Зафиксировать сбор</button>
+            <button class="button button-primary" data-action="open-collection" hidden>Зафиксировать сбор</button>
           </div>
         </header>
 
@@ -111,10 +117,20 @@
           <label class="field field-wide">Партия<select name="batchId" id="saleBatch" required></select></label>
           <label class="field">Упаковок<input name="packs" type="number" min="1" step="1" required /></label>
           <label class="field">Цена за упаковку, ₸<input name="unitPrice" type="number" min="0" step="1" required /></label>
-          <label class="field field-wide">Канал<select name="channel"><option>Пилот в кофейне</option><option>Партнёрская точка</option><option>Тестовый заказ</option></select></label>
+          <label class="field field-wide">Канал<select name="channel"><option>Кофейня</option><option>Партнёрская точка</option><option>Прямой заказ</option></select></label>
         </div>
-        <div class="dialog-note">Запись уменьшит остаток партии. В демо продажи остаются синтетическими.</div>
+        <div class="dialog-note">Запись уменьшит остаток готовой продукции.</div>
         <div class="dialog-actions"><button class="button button-ghost" value="cancel">Отмена</button><button class="button button-primary" type="submit">Зафиксировать продажу</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="stageDialog" class="dialog">
+      <form method="dialog" id="stageForm">
+        <div class="dialog-header"><div><p class="eyebrow">Производство</p><h2 id="stageTitle">Подтвердить этап</h2></div><button class="icon-button" value="cancel" aria-label="Закрыть">×</button></div>
+        <input type="hidden" name="batchId" />
+        <input type="hidden" name="phase" />
+        <div id="stageInputs" class="form-grid"></div>
+        <div class="dialog-actions"><button class="button button-ghost" value="cancel">Отмена</button><button class="button button-primary" type="submit" id="stageSubmit">Сохранить</button></div>
       </form>
     </dialog>
 
