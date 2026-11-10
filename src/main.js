@@ -25,7 +25,7 @@ let selectedMapTrip = null;
 let journalFilter = 'all';
 let activeMap = null;
 let activeBaseLayer = null;
-let mapStyle = localStorage.getItem('gl_map_style') === 'streets' ? 'streets' : 'imagery';
+let mapStyle = localStorage.getItem('gl_map_style') === 'imagery' ? 'imagery' : 'streets';
 let gpsAttemptedTrip = null;
 let lastNotificationId = null;
 let refreshing = false;
@@ -87,7 +87,8 @@ function shell(title, subtitle, actions, body) {
   app.innerHTML = `<div class="shell"><header class="top"><div class="top-inner">${brand()}<div class="top-context"><span class="top-divider"></span><span>Шымкент</span></div><div class="top-right"><div class="top-user"><strong>${esc(staff.full_name)}</strong><small>${esc(user.email)}</small></div><button data-action="logout">Выйти</button></div></div></header><main class="container"><section class="hero"><div><div class="eyebrow">${esc(pageNames[staff.role])}${staff.store_id ? ` / ${esc(storeName(staff.store_id))}` : ''}</div><h1>${esc(title)}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="hero-actions">${actions || ''}</div></section><div class="workspace">${body}</div></main></div>`;
   const workspace=app.querySelector('.workspace');
   const nav=workspace.querySelector(':scope > .tabs');
-  if(nav){const main=document.createElement('div');main.className='workspace-main';for(const child of [...workspace.children])if(child!==nav)main.append(child);workspace.append(main);}
+  if(nav){const main=document.createElement('div');main.className='workspace-main';for(const child of [...workspace.children])if(child!==nav)main.append(child);workspace.append(main);
+    if(staff.role==='manager'&&activeTab==='overview'){const mapPanel=main.querySelector(':scope > .map-layout');const summary=main.querySelector(':scope > .overview-grid');if(mapPanel&&summary)summary.before(mapPanel);}}
   syncDeliveryField();
   if (document.querySelector('#operationsMap')) requestAnimationFrame(() => void drawOperationsMap());
 }
@@ -366,7 +367,7 @@ async function drawOperationsMap() {
     const point=mapPoint(store.latitude,store.longitude);
     if (!point) continue;
     const count=records.containers.filter(c=>c.store_id===store.id&&['ready','assigned','picked_up'].includes(c.status)).length;
-    L.marker(point,{icon:L.divIcon({className:'map-marker',html:`<span class="store-marker ${count?'has-work':''}">${count||'•'}</span>`,iconSize:[36,36],iconAnchor:[18,18]})})
+    L.marker(point,{icon:L.divIcon({className:'map-marker',html:`<span class="store-marker ${count?'has-work':''}">${visibleIds.indexOf(store.id)+1}</span>`,iconSize:[36,36],iconAnchor:[18,18]})})
       .bindPopup(`<strong>${esc(store.name)}</strong><br>${esc(store.address||'Адрес не указан')}<br>${count} ${word(count,'заявка','заявки','заявок')}`).addTo(map);
     bounds.push(point);
   }
