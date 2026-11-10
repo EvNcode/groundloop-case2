@@ -36,6 +36,7 @@ let historyOldestFirst = false;
 let historyOffset = 0;
 let historyHasMore = false;
 let historyLoading = false;
+let historyDirty = false;
 let historyTimer;
 let routeCache = new Map();
 document.body.dataset.theme = theme;
@@ -157,6 +158,7 @@ function checked(result) { if (result.error) throw result.error; return result.d
 async function loadSalesHistory(append=false) {
   if (!staff || staff.role!=='manager' || historyLoading) return;
   historyLoading=true;
+  historyDirty=false;
   const offset=append?historyOffset:0;
   try {
     const rows=checked(await supabase.rpc('gl_search_sales_history',{
@@ -170,7 +172,7 @@ async function loadSalesHistory(append=false) {
     if(activeTab==='sales' && !document.activeElement?.closest('#historySearch')) render();
     else updateHistoryResults();
   } catch(error) { console.error(error);toast('Историю передач не удалось загрузить'); }
-  finally { historyLoading=false; }
+  finally { historyLoading=false; if(historyDirty){historyDirty=false;void loadSalesHistory(false);} }
 }
 function historyResultsMarkup() {
   return `${salesHistory.length?salesHistory.map(x=>productOrderItem(x,'manager')).join(''):empty('Совпадений нет','Проверьте имя, код или дату.')}${historyHasMore?`<div class="history-more">${button('Показать ещё','history-more','','btn-sm')}</div>`:''}`;
@@ -799,6 +801,7 @@ function updateHistorySearch(form) {
   historyQuery=form.elements.query.value;
   historyDate=form.elements.date.value;
   historyOldestFirst=form.elements.sort.value==='old';
+  historyDirty=true;
   clearTimeout(historyTimer);
   historyTimer=setTimeout(()=>void loadSalesHistory(false),280);
 }
@@ -808,6 +811,7 @@ document.addEventListener('change',event=>{
   if(event.target.closest('#historySearch'))updateHistorySearch(event.target.form);
 });
 document.addEventListener('submit',event=>{
+  if (event.target.id==='historySearch') { event.preventDefault(); updateHistorySearch(event.target); return; }
   if (event.target.id==='loginForm') {
     event.preventDefault();
     const email=event.target.elements.email.value.trim().toLowerCase();
